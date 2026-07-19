@@ -25,6 +25,7 @@ class VCSRuntime:
     def stop(self):
         self.stop_event.set()
         self.local_runtime.stop()
+        self.queue.close()
 
 
 if __name__ == "__main__":

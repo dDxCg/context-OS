@@ -1,6 +1,6 @@
 from pathlib import Path
 import shutil
-from src.utils.helper import save_to_file, gen_hash, make_dirs, path_normalize, read_file
+from utils.helper import save_to_file, gen_hash, make_dirs, path_normalize, read_file
 
 class TempFile:
     TMP_DIR = Path("data/tmp")

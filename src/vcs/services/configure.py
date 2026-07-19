@@ -47,6 +47,17 @@ def remove_sources(paths: list[Path]):
     _dump_config(config_content=config)
     
 
+def is_path_in_scope(path, config=None) -> bool:
+    config = config or parse_config()
+    target = Path(path_normalize(path))
+    for source in config["sources"]:
+        if source.get("type") != "local":
+            continue
+        source_path = Path(source["path"])
+        if target == source_path or target.is_relative_to(source_path):
+            return True
+    return False
+
 def get_config_diff():
     curr = parse_config()
     prev = parse_config(from_snapshot=True)
@@ -64,7 +75,7 @@ def parse_config(from_snapshot=False):
     if from_snapshot:
         config_path = CONFIG_SNAPSHOT_FILE
     with open(config_path) as f:
-        config_content = yaml.safe_load(f)
+        config_content = yaml.safe_load(f) or {"sources": []}
 
     for source in config_content["sources"]:
         source["path"] = path_normalize(source["path"])
@@ -88,7 +99,7 @@ def store_config_snapshot():
 
 def recover_config():
     config_content = parse_config(from_snapshot=True)
-    config_path = get_config_path
+    config_path = get_config_path()
     Path(config_path).parent.mkdir(parents=True, exist_ok=True)
     with open(config_path, "w", encoding="utf-8") as f:
         yaml.safe_dump(

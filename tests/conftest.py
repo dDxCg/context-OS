@@ -1,5 +1,6 @@
 pytest_plugins = [
-    "tests.fixtures.db"
+    "tests.fixtures.db",
+    "tests.fixtures.config",
 ]
 
 def pytest_sessionfinish(session, exitstatus):

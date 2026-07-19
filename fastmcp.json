@@ -1,0 +1,13 @@
+{
+  "$schema": "./.fastmcp/fastmcp.schema.json",
+  "source": {
+    "path": "src/app/mcp/server.py",
+    "entrypoint": "mcp"
+  },
+  "environment": {
+    "project": "."
+  },
+  "deployment": {
+    "transport": "stdio"
+  }
+}

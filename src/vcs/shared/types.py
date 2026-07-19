@@ -77,17 +77,17 @@ class MovedEvent(SourceEvent):
 
 @dataclass
 class ConfigCreatedEvent(CreatedEvent):
-    src = path_normalize(get_config_path())
+    src: str = field(default_factory=lambda: path_normalize(get_config_path()))
 
 @dataclass
 class ConfigModifiedEvent(ModifiedEvent):
-    src = path_normalize(get_config_path())
+    src: str = field(default_factory=lambda: path_normalize(get_config_path()))
 
 @dataclass
 class ConfigMovedEvent(MovedEvent):
-    src = path_normalize(get_config_path())
+    src: str = field(default_factory=lambda: path_normalize(get_config_path()))
 
 @dataclass
 class ConfigDeletedEvent(DeletedEvent):
-    src = path_normalize(get_config_path())
+    src: str = field(default_factory=lambda: path_normalize(get_config_path()))
 

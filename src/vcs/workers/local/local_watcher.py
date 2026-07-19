@@ -43,15 +43,17 @@ class WatchWorker:
                 except Exception as e:
                     logging.error(f"[WATCH ERROR] {e}")
 
-        self.observer.schedule(Handler(), path, recursive=recursive)
-        self.jobs.append((path, callback))
+        watch = self.observer.schedule(Handler(), path, recursive=recursive)
+        self.jobs.append((path, callback, watch))
 
     def remove_watch(self, path):
         """Stops watching a specific path."""
-        watch_token = self.jobs.pop(path, None)
-        if watch_token:
-            self.observer.unschedule(watch_token)
-            logging.info(f"[WATCH] Removed watch for {path}")
+        for job in self.jobs:
+            if job[0] == path:
+                self.jobs.remove(job)
+                self.observer.unschedule(job[2])
+                logging.info(f"[WATCH] Removed watch for {path}")
+                return
 
     def start(self):
         logging.info("WatchWorker starting...")

@@ -29,8 +29,8 @@ class ConfigConsumer(Consumer):
             for path in added_paths:
                 files = collect_files(path)
                 for f in files:
-                    event = CreatedEvent(path=f)
-                    runtime.consumer_worker.queue.publish(event)
+                    created_event = CreatedEvent(src=f)
+                    runtime.consumer_worker.queue.publish(created_event)
 
                 runtime.watcher.add_watch(
                     path=path,
@@ -55,6 +55,7 @@ class ConfigConsumerWorker(ConsumerWorker):
             super().__init__(stop_event, consumer_cls, event_broker_cls, queue)
             self.runtime = runtime
 
+    @log_enabled
     def run(self):
         self.consumer = self.consumer_cls.from_db_url(get_db_url())
         while True:

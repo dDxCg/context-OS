@@ -16,15 +16,15 @@ import yaml
 class Initializer:
     def __init__(self):
         self.db_handler = DBHandler.from_url(get_db_url())
+        init_config_file()
         self.sources = self._get_sources(get_config_path())
-        
+
 
     @log_enabled
     def init(self):
         create_dirs()
 
         self._init_schema()
-        init_config_file()
 
         store_config_snapshot()
         #Fetch status with config sources
@@ -40,7 +40,7 @@ class Initializer:
 
     def _get_sources(self, config_path: Path):
         with open(config_path, "r") as f:
-            config = yaml.safe_load(f)
+            config = yaml.safe_load(f) or {"sources": []}
         return config["sources"]
     
     

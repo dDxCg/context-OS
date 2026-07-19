@@ -82,6 +82,6 @@ class Seeder:
             )
 
     def seed_db(self, ctx_rows=None, loc_rows=None, ver_rows=None):
-        self.seed_contexts(self, ctx_rows)
-        self.seed_locations(self, loc_rows)
-        self.seed_versions(self, ver_rows)
+        self.seed_contexts(ctx_rows)
+        self.seed_locations(loc_rows)
+        self.seed_versions(ver_rows)

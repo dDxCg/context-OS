@@ -3,7 +3,7 @@ from vcs.shared.config import BLOB_DIR, NEW_VERSION_THRESHOLD
 from utils.logger import log_enabled
 from vcs.shared.types import CreatedEvent, ContextEntry, DeletedEvent, MovedEvent, Query, Version, ModifiedEvent
 from vcs.db.sqlite import DBHandler
-from utils.helper import text_similarity, bytes_to_string, path_normalize, collect_files, get_path_stats
+from utils.helper import text_similarity, bytes_to_string, path_normalize, collect_files, get_path_stats, gen_hash
 from vcs.shared.temp_file import TempFile
 
 
@@ -57,8 +57,9 @@ def modified_handle(db_handler: DBHandler, event: ModifiedEvent, tmp_file: TempF
         create_event = CreatedEvent(src=event.src)
         return created_handle(db_handler, create_event)
     current_version = _check_current_version(db_handler, context_id)
-    new_hash = _get_version_hash(db_handler, context_id, current_version)
-    if _decide_to_append_version(tmp_file, content_hash=new_hash):
+    previous_hash = _get_version_hash(db_handler, context_id, current_version)
+    if _decide_to_append_version(tmp_file, content_hash=previous_hash):
+        new_hash = gen_hash(tmp_file.read_bytes())
         version = Version(
             version_number=current_version+1,
             context_id=context_id,
