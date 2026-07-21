@@ -3,12 +3,28 @@
 Found during code review of the worker-abstraction refactor (`3630dc5`) plus the
 uncommitted fix-in-progress on top of it. Ranked most severe first.
 
-Open: **#1** (shared queue race) and **#10** (config file never watched,
-found via live-testing). Fixed: #2-#9, each with a regression test that's
-no longer `xfail` (except #9, found and fixed via live-testing rather than
-a unit test — see its entry).
+Open: **#15-#20**, all found while planning the config-control CLI and
+background daemon — see [cli-plan.md](cli-plan.md). Fixed: #1-#14, each with
+a regression test that's no longer `xfail` (except #9, found and fixed via
+live-testing rather than a unit test — see its entry).
 
-## 1. Shared queue race causes indefinite shutdown block
+#15-#20 are a different class from everything above: rather than watcher or
+queue defects, they are gaps that only become reachable once the CLI is
+installed as a real binary and the runtime is stopped by a signal instead of
+Ctrl+C. #15, #17 and #18 each make part of the planned CLI impossible, not
+merely degraded.
+
+#12-#14 came out of decoupling watch targets from config sources, so that
+the MCP guardrail's file-granular grants stop creating one watcher per
+approved file. All three were found by live-testing, not by unit tests —
+the unit tests mock the watcher and so cannot see any of them.
+
+#1 and #10 were fixed together via Option A (dedicated queue per consumer
+plus a router), since they are mutually dependent: separating the config
+consumer is pointless while no `Config*Event` is ever produced. That work
+also surfaced #11 (watch path-format mismatch).
+
+## 1. ~~Shared queue race causes indefinite shutdown block~~ — FIXED
 
 **Files:** `src/vcs/workers/local/local_runtime.py:27`, `src/vcs/runtime.py:27-28`
 
@@ -119,9 +135,35 @@ shared queue causes two distinct failures, not just the shutdown hang:
   third consumer type is ever added — neither A nor C's two-consumer-role
   assumption holds at that point.
 
-Not yet implemented — left as an evaluation per request; #2-#9 below were
-fixed, #1 (and #10, which Option C still needs as a prerequisite) intentionally
-were not.
+**Implemented: Option A** (not C). With MCP enforcement synchronous, the
+choice was a simplicity/throughput trade-off rather than a correctness one,
+and A keeps config-adapt work off the versioning thread — the config
+consumer now does inline DB writes (`collect_files` → `created_handle` /
+`deleted_handle`) that would otherwise stall file versioning behind a
+directory walk.
+
+What changed:
+- `LocalRuntime` owns two `LocalQueue`s (`queue`, `config_queue`) and
+  publishes `STOP` to both in `stop()`.
+- `LocalRuntime._route()` demuxes watcher events by type; the config-file
+  watch uses `_route_config_only()`, which drops non-config events so
+  unrelated siblings in the config's parent directory aren't versioned.
+- `CONFIG_EVENTS` in `shared/types.py` is the single discriminator. It's
+  needed because `ConfigCreatedEvent` subclasses `CreatedEvent`, so a bare
+  `isinstance(e, CreatedEvent)` is true for config events. `LocalConsumer`
+  now early-returns on it as defence in depth.
+- `ConfigConsumer.handle()` conforms to the `Consumer` ABC again — the
+  `runtime` parameter is gone (with it, the circular import and the
+  reference cycle). It takes an injected `watcher` and `publish` callback,
+  set via the new `ConsumerWorker._configure_consumer()` hook, which let
+  `ConfigConsumerWorker` drop its duplicated `run()` loop entirely.
+- New source watches now go through the router rather than
+  `consumer_worker.consumer.handle`, which had been calling into a
+  cross-thread sqlite connection from the watchdog dispatch thread.
+
+Verified end-to-end: editing `config.yaml` adds/removes watches, ingests
+new sources at `status=1`, flips removed sources to `status=0`, and
+shutdown returns promptly with both workers joined.
 
 **Update:** the direction is now to eventually move `EventBroker` to
 RabbitMQ (multiple, possibly out-of-process producers — see the `3rd-party`
@@ -322,7 +364,7 @@ import, before ever reaching `main()`.
 
 Fixed to `from utils.helper import ...`, matching every other module.
 
-## 10. Config file itself is never watched — hot-reload is dead code today
+## 10. ~~Config file itself is never watched — hot-reload is dead code today~~ — FIXED
 
 **File:** `src/vcs/workers/local/local_runtime.py:37-43` (`_init_worker`)
 
@@ -358,13 +400,329 @@ So even after issue #1 is fixed, editing `config.yaml` while the app is
 running will silently do nothing — `ConfigConsumer`/`ConfigConsumerWorker`
 exist and are wired up correctly, but never receive an event to act on.
 
-**Fix direction:** register a watch on `Path(get_config_path()).parent` (or
-the file itself, depending on what the `watchdog` backend supports reliably
-across platforms) pointing at the config queue, alongside the per-source
-watches in `_init_worker` — this pairs naturally with the issue #1 fix
-(option A), which already needs a dedicated `callback=config_consumer_worker
-.queue.publish` for exactly this watch.
+**Fixed** alongside #1. `_init_worker` now registers
+`Path(get_config_path()).parent` with `recursive=False` and
+`callback=self._route_config_only`.
+
+Two details that matter:
+- **`recursive=False` is mandatory.** The config file's parent is typically
+  the repo root; a recursive watch there would flood the queue with events
+  for the entire tree.
+- **The callback must drop non-config events.** That watch still fires for
+  unrelated siblings in the parent directory, and `normalize_event()`
+  returns *plain* events for them. Routing those onto the local queue would
+  version arbitrary repo-root files that no source covers — hence
+  `_route_config_only()` rather than the general `_route()`.
+
+Watching the parent rather than the file itself is deliberate: `watchdog`
+is unreliable watching a single file, and editors commonly save via atomic
+rename, which destroys a file-level watch.
+
+Confirmed live: editing `config.yaml` under a running runtime now produces
+a real `ConfigModifiedEvent` that reaches `ConfigConsumer.handle`.
+
+## 11. Watch path-format mismatch made `remove_watch()` silently no-op — FIXED
+
+**Files:** `src/vcs/workers/local/local_watcher.py` (`add_watch`/`remove_watch`)
+
+*Found while live-testing the #1/#10 fix — the delete path appeared to work
+in unit tests because they mock the watcher.*
+
+`WatchWorker.remove_watch()` matches jobs by string equality
+(`job[0] == path`), but the two callers registered and looked up paths in
+different formats:
+
+- `LocalRuntime._init_worker` watched `source["path"]` straight from
+  `Initializer._get_sources()`, which is a raw `yaml.safe_load` — **not**
+  normalized, so backslashed on Windows.
+- `ConfigConsumer` removes paths from `get_config_diff()`, which goes
+  through `parse_config()` → `path_normalize()` — posix separators.
+
+So `C:\...\src_a` never equalled `C:/.../src_a`, and removing a source that
+had been watched since startup silently did nothing. The watch stayed live:
+files under a source removed from config kept being versioned, and their
+`locations.status` would flip back to 1 on the next edit after the config
+consumer set it to 0.
+
+Fixed by normalizing in `WatchWorker` itself — `add_watch()` and
+`remove_watch()` both call `path_normalize()`, so registration and lookup
+agree regardless of what format the caller passes.
 
 ---
 
 *Cross-referenced in [note.md](note/note.md) under "Known issues".*
+
+## 12. File-granular sources are not watchable, and create one watcher each — FIXED
+
+**Files:** `src/vcs/services/configure.py` (`derive_watch_targets`),
+`src/vcs/workers/local/local_watcher.py` (`reconcile`),
+`src/vcs/workers/local/local_runtime.py` (`_route`)
+
+`config.yaml` sources served two roles at once: the access-control scope
+list and the watch-target list. Those want opposite granularity. Scope
+wants to be narrow — the MCP guardrail deliberately grants the exact file
+(`add_sources([path])` in `app/mcp/guardrail.py`) so approving one file
+doesn't expose its siblings. Watches want to be coarse — one directory
+watch covers a whole tree.
+
+Two consequences:
+
+1. **A file path is not watchable.** The granted file path reached
+   `observer.schedule(handler, <file>, recursive=True)`. Watchdog documents
+   that parameter as *"Directory path that will be monitored"*, and the
+   Windows backend calls `CreateFileW(path, FILE_LIST_DIRECTORY, …)` then
+   `ReadDirectoryChangesW`, which fails on a non-directory handle. On Linux
+   inotify it appears to work but breaks on the atomic-rename saves most
+   editors perform.
+2. **One watcher per approved file.** An agent reading 50 files in one
+   directory produced 50 watches where 1 would do. No cap existed anywhere.
+
+**Fixed** by making watch targets *derived* rather than 1:1 with sources:
+
+- `derive_watch_targets(config=None)` maps each source to its containing
+  directory, then drops any directory an ancestor already covers
+  recursively. It walks up to the nearest *existing* directory, and returns
+  nothing rather than falling back to a filesystem root — resolving a
+  fully-missing path to `/` or `C:\` would put the whole disk under the
+  watcher.
+- `WatchWorker.reconcile(desired, callback, tag=...)` replaces a tagged
+  watch set wholesale. Per-source add/remove deltas cannot express "these
+  two sources collapsed into one watch". Jobs carry a `tag` so reconciling
+  source watches never collects the config-file watch.
+- `LocalRuntime._route` now filters events through `is_path_in_scope()`.
+  This is load-bearing: a derived watch is deliberately *broader* than the
+  granted scope, so without the filter, watching `/a` because `/a/x.txt`
+  was approved would also version `/a/secret.txt`. Scope enforcement moved
+  from "only watch what's in scope" to "filter what we watch against scope".
+- The parsed config is memoized in the router, since `is_path_in_scope`
+  re-parses `config.yaml` on every call and now runs per filesystem event.
+  No lock: watchdog's `BaseObserver.dispatch_events` runs every handler on
+  a single dispatcher thread. That dependency is commented in the code.
+- `add_sources` now skips paths already in scope, not just exact
+  duplicates, so `config.yaml` stops accumulating subsumed entries.
+
+Verified live: two files approved in the same new directory grow the watch
+set by exactly one entry (the parent directory), both get `status=1`, and
+an unapproved sibling in that same directory is not versioned.
+
+## 13. Debounce silently drops config changes — FIXED
+
+**File:** `src/vcs/workers/local/local_watcher.py` (`add_watch`)
+
+`WatchWorker._should_process` coalesces events per path within 0.5s. For
+ordinary files a dropped event is harmless — the next edit re-fires it.
+For the config file it is **permanent**: the dropped event carried a diff
+that is never re-applied.
+
+Rapid successive writes are the *normal* case for `config.yaml`, because
+the guardrail calls `add_sources()` once per approved path — an agent
+reading several files in a row writes the config several times well inside
+the debounce window.
+
+**Fixed** with a `debounce=True` parameter on `add_watch`; `LocalRuntime`
+passes `debounce=False` for the config watch. Processing a config event
+twice is harmless (the second diff is empty), so opting out is safe.
+
+## 14. Config diff and snapshot read the file separately — FIXED
+
+**Files:** `src/vcs/services/configure.py` (`get_config_diff`,
+`store_config_snapshot`), `src/vcs/workers/config/config_consumer.py`
+
+The worst of the three, and invisible until #13 was fixed. `get_config_diff()`
+and `store_config_snapshot()` each independently re-read `config.yaml`. If
+the file changed between those two reads, the snapshot advanced to state
+that was **never applied** — and because the baseline had moved, every
+later diff reported nothing. The change was lost permanently.
+
+Observed live with two rapid approvals: `config.yaml` correctly contained
+both `one.txt` and `two.txt`, `one.txt` was ingested, and `two.txt` had no
+`locations` row and never got one — subsequent diffs were all empty.
+
+**Fixed** by reading the config once and threading that object through the
+whole operation. `get_config_diff(config=...)` and
+`store_config_snapshot(config_content=...)` both accept it, and
+`ConfigConsumer.handle` calls `parse_config()` a single time and passes the
+result to the diff, the watch derivation, and the snapshot. The baseline
+now only ever advances to state that was actually applied, so a concurrent
+write is picked up by the next event instead of being swallowed.
+
+---
+
+## 15. Wheel packaging omits `src/utils` — the installed CLI cannot start — OPEN
+
+**File:** `pyproject.toml:38-39`
+
+```toml
+[tool.hatch.build.targets.wheel]
+packages = ["src/app", "src/vcs"]
+```
+
+`utils` is a third top-level package (confirmed by
+`src/chrono_ctx.egg-info/top_level.txt`, which lists `app`, `utils`, `vcs`) and it is
+imported unconditionally on every startup path:
+
+- `vcs/runtime.py` → `from utils.logger import setup_logger`
+- `vcs/initialize.py` → `from utils.helper import get_db_url, get_config_path`
+- `vcs/services/configure.py` → `from utils.helper import ...`
+- `vcs/shared/config.py` → `from utils.helper import anchored`
+
+A built wheel therefore installs the `ctx` console script and dies with
+`ImportError: No module named 'utils'` on the first command. This is invisible today only
+because the venv carries an editable install (`_editable_impl_chrono_ctx.pth`) that maps
+the real source tree.
+
+Note the `egg-info` directory is a **stale setuptools artifact** — the project moved to
+hatchling in `cbad045` and `*.egg-info` is gitignored. Its `top_level.txt` happens to be
+correct where `pyproject.toml` is wrong, but do not trust the rest of it: `SOURCES.txt`
+still references `vcs/workers/3rd_party/polling_worker.py`, which no longer exists.
+
+**Fix:** add `"src/utils"` to the wheel packages list. Verify with a real build installed
+into a clean venv, not with the editable install.
+
+## 16. No SIGTERM handler — every non-Ctrl+C shutdown skips cleanup — OPEN
+
+**Files:** `src/vcs/runtime.py:19-23`, `src/vcs/workers/local/local_runtime.py:124-127`
+
+The only stop trigger anywhere in the codebase is `except KeyboardInterrupt`. There is no
+`signal.signal(...)` call in `src/` at all.
+
+SIGTERM does not raise `KeyboardInterrupt` — Python's default handler terminates the
+process immediately. So on `docker stop`, `systemctl stop`, or any supervisor-issued
+shutdown, `VCSRuntime.stop()` never runs: the watcher is not stopped, the queues are never
+drained of their `STOP` sentinels, worker threads are not joined, and the SQLite connection
+is never closed (`DBHandler.close()` is called on no shutdown path at all).
+
+This is currently latent because the documented way to run the app is a foreground
+`python -m vcs.runtime` ended with Ctrl+C. It becomes a live defect the moment the runtime
+is backgrounded, which is exactly what [cli-plan.md](cli-plan.md) adds.
+
+**Fix:** install `SIGTERM`/`SIGINT` handlers that call `VCSRuntime.stop()`, and make
+`stop()` idempotent — `LocalRuntime` already catches `KeyboardInterrupt` and calls its own
+`stop()`, so the outer handler can currently double-stop and re-publish `STOP` onto a
+closed queue.
+
+**Windows caveat that shapes the daemon design:** `os.kill(pid, SIGTERM)` on Windows maps
+to `TerminateProcess` — abrupt, no cleanup, defeating this fix entirely. A stopper must
+send `CTRL_BREAK_EVENT` (which requires the child to have been spawned with
+`CREATE_NEW_PROCESS_GROUP`); that raises `KeyboardInterrupt` in the child, reusing the path
+the runtime already handles.
+
+## 17. `created_handle` never writes a blob — v1 content is unrecoverable — OPEN
+
+**Files:** `src/vcs/services/versioning.py:11-51` (`_append_context`),
+`src/vcs/adapters/local_adapter.py:31-32`
+
+Two ingest paths disagree about persisting content:
+
+- `LocalAdapter.local_file_processing` — the **startup** path — writes the blob:
+  ```python
+  _append_context(self.db_handler, context_entry)
+  save_path = BLOB_DIR / f"{content_hash}.blob"
+  save_path.write_bytes(file_content)
+  ```
+- `created_handle` → `_append_context` — the **watcher** path — inserts the `versions` row
+  with its `content_hash` but never writes the corresponding blob. Only `modified_handle`
+  does, at `versioning.py:69`.
+
+So a file present at startup has a retrievable v1, but a file created *while the daemon is
+running* does not — including every file added through MCP guardrail approval, since
+`ConfigConsumer` calls `created_handle` directly.
+
+This is the same startup-vs-hot-path divergence class as issues #10 and #12.
+
+**Verified against `data/db-dev.sqlite`, not inferred:**
+
+```
+version rows: 17    blob files: 9
+versions WITHOUT a blob: 4      <- content permanently unrecoverable
+```
+
+**Consequence:** `ctx rollback <file> -v 1` can never work for a watcher-created file, and
+`ctx diff` involving such a version has nothing to read. This makes the planned audit
+commands impossible, not merely degraded.
+
+**Fix:** have `_append_context` persist the blob when it creates a version, matching
+`LocalAdapter`. Forward-looking only — the 4 existing blob-less versions cannot be
+recovered, which is why `get_version_list` is specced to expose an `available` flag per
+version.
+
+## 18. `modified_handle` has no same-hash guard — every version is duplicated — OPEN
+
+**File:** `src/vcs/services/versioning.py:54-71`
+
+`_append_context` guards against re-recording identical content via
+`_check_existed_version` (`versioning.py:23`). `modified_handle` has no equivalent check.
+
+**Verified against `data/db-dev.sqlite`** — the only file in the database with real history
+is entirely duplicate pairs:
+
+```
+01KW7DM9KX5ZPCHN8M8H8T5VAD   github-cicd.yaml
+  v1  0a0a6a4737  MISSING       v2  0a0a6a4737  MISSING
+  v3  6e113b86de  blob          v4  6e113b86de  blob
+  v5  c44b6f2ef8  MISSING       v6  c44b6f2ef8  MISSING
+```
+
+Three distinct contents stored as six versions — a 100% duplication rate. `ctx history`
+would show doubled noise and `ctx diff --from 1 --to 2` would report no difference.
+
+**Root cause is only partly established.** The v1/v2 pair follows from issue #17: with no
+blob on disk, `_decide_to_append_version` hits
+`if not current_blob_path.exists(): return True` and forces a new version even though the
+content is unchanged. The v3/v4 pair is **not** explained by static reading — the blob for
+v3 does exist, so the similarity check should have returned `False`. Do not assume the two
+pairs share a cause; the missing guard is the correct fix either way, but the v3/v4
+mechanism warrants confirmation during implementation.
+
+**Fix:** reuse `_check_existed_version` in `modified_handle`, exactly as `_append_context`
+already does. Forward-looking only; existing duplicate rows stay.
+
+## 19. `TempFile.TMP_DIR` is cwd-relative — OPEN
+
+**File:** `src/vcs/shared/temp_file.py:6`
+
+```python
+class TempFile:
+    TMP_DIR = Path("data/tmp")
+```
+
+Every other configured path in the project was moved to project-root anchoring precisely
+because "the MCP server and the VCS runtime are separate processes whose working
+directories need not match" (`vcs/shared/config.py:6-9`). This constant was missed.
+
+Harmless while the runtime is launched from the repo root; breaks for a detached daemon,
+which has an arbitrary cwd — it would scatter `data/tmp` directories wherever it happened
+to start, and `modified_handle` would stage blobs outside the real data directory.
+
+**Fix:** route through `anchored()` like `SNAPSHOT_DIR`. Note it is a class attribute
+evaluated at import, so tests must monkeypatch the attribute rather than an env var (the
+same reason `tests/fixtures/config.py` patches `configure.CONFIG_SNAPSHOT_FILE` directly).
+
+## 20. No WAL mode and no busy timeout — CLI and daemon will contend — OPEN
+
+**File:** `src/vcs/db/sqlite.py:10-12`
+
+```python
+@classmethod
+def from_url(cls, db_url):
+    return cls(sqlite3.connect(db_url))
+```
+
+No `timeout` argument (so the default busy timeout applies with no retry anywhere), and
+`PRAGMA journal_mode=WAL` is set nowhere — not in `sqlite.py`, not in `services/db.py`, not
+in `data/schema.sql`. In SQLite's default rollback-journal mode a writer blocks all readers.
+
+Not a problem today, because only one process ever opens the database. It becomes one as
+soon as a CLI reads the DB while the daemon is writing: `ctx history` can fail with
+`database is locked`, and `ctx rollback` — a write — can fail against a busy daemon.
+
+Related sharp edges in the same file: `execute()` does not guard `self.conn is None` (giving
+`AttributeError: 'NoneType' object has no attribute 'cursor'` after `close()`, where
+`execute_script` raises a clear `ValueError`), and `execute()` defaults to `commit=True` so
+even reads commit.
+
+**Fix:** enable WAL and pass a `timeout` in `from_url`; add `__enter__`/`__exit__` to
+`DBHandler` for short-lived CLI use — it already has `close`/`commit`/`rollback`/`begin`.
+That also fixes the runtime's connection never being closed (issue #16).
+
+---

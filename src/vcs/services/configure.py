@@ -26,7 +26,10 @@ def add_sources(paths: list[Path]):
     config = parse_config()
     path_set = set(paths)
     for path in path_set:
-        if _check_existed_path(path, config_content=config):
+        # Skip anything an existing source already covers, not just exact
+        # duplicates - otherwise config.yaml accumulates entries subsumed by a
+        # broader source (the MCP guardrail grants one path at a time).
+        if is_path_in_scope(path, config=config):
             continue
         source_entry = {
             "type": "local",
@@ -58,8 +61,67 @@ def is_path_in_scope(path, config=None) -> bool:
             return True
     return False
 
-def get_config_diff():
-    curr = parse_config()
+def derive_watch_targets(config=None) -> list[str]:
+    """Minimal set of directories covering every local source.
+
+    Sources are file-granular - the MCP guardrail grants the narrowest path it
+    can - but watchdog watches directories. Map each source to its containing
+    directory, then drop any directory an ancestor already covers recursively,
+    so N approved files in one directory collapse to a single watch.
+
+    Callers must filter incoming events against is_path_in_scope(): a watch
+    derived this way is deliberately broader than the granted scope.
+    """
+    config = config or parse_config()
+
+    dirs = set()
+    for source in config["sources"]:
+        if source.get("type") != "local":
+            continue
+        target = _nearest_existing_dir(source["path"])
+        if target is not None:
+            dirs.add(target)
+
+    return [
+        d for d in dirs
+        if not any(o != d and Path(d).is_relative_to(Path(o)) for o in dirs)
+    ]
+
+
+def _nearest_existing_dir(path) -> str | None:
+    """Closest existing directory at or above `path`, or None.
+
+    Returns None rather than walking all the way up to a filesystem root - a
+    source whose entire ancestry is missing is not watchable, and watching '/'
+    or 'C:\\' to compensate would put the whole disk under the watcher.
+    """
+    p = Path(path_normalize(path))
+    if p.is_dir():
+        return path_normalize(str(p))
+
+    p = p.parent
+    while not p.is_dir():
+        if p == p.parent:
+            return None
+        p = p.parent
+
+    # Reaching an anchor means nothing along the path existed.
+    if p == Path(p.anchor):
+        return None
+    return path_normalize(str(p))
+
+
+def get_config_diff(config=None):
+    """Sources added/removed since the last snapshot.
+
+    Pass `config` to diff against a config you already read. Callers that
+    afterwards call store_config_snapshot() must do this and pass the same
+    object to both: config.yaml can be rewritten between the two calls (the
+    MCP guardrail appends one path per approval), and re-reading it in the
+    snapshot would advance the baseline past changes never applied - losing
+    them permanently, since the next diff would then report nothing.
+    """
+    curr = config or parse_config()
     prev = parse_config(from_snapshot=True)
     curr_paths = [s["path"] for s in curr["sources"]]
     prev_paths = [s["path"] for s in prev["sources"]]
@@ -84,8 +146,13 @@ def parse_config(from_snapshot=False):
 
     return config_content
 
-def store_config_snapshot():
-    config_content = parse_config()
+def store_config_snapshot(config_content=None):
+    """Record the current source list as the diff baseline.
+
+    Pass the same config object that get_config_diff() was given, so the
+    baseline only ever advances to state that was actually applied.
+    """
+    config_content = config_content or parse_config()
     if not CONFIG_SNAPSHOT_FILE.exists():
         CONFIG_SNAPSHOT_FILE.parent.mkdir(parents=True, exist_ok=True)
         CONFIG_SNAPSHOT_FILE.touch(exist_ok=True)

@@ -24,7 +24,10 @@ class LocalQueue(EventBroker):
             return None
         return event
 
-    @log_enabled    
+    @log_enabled
     def close(self):
-        self.queue.task_done()
+        # Idempotent: both the consumer worker (on STOP) and VCSRuntime.stop()
+        # close the same queue. This used to call task_done(), which raises
+        # ValueError("task_done() called too many times") on the second call.
+        self.closed = True
          

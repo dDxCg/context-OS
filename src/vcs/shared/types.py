@@ -91,3 +91,12 @@ class ConfigMovedEvent(MovedEvent):
 class ConfigDeletedEvent(DeletedEvent):
     src: str = field(default_factory=lambda: path_normalize(get_config_path()))
 
+# Config events subclass the plain events, so isinstance(e, CreatedEvent) is true
+# for a ConfigCreatedEvent. Dispatch and routing must check this tuple explicitly.
+CONFIG_EVENTS = (
+    ConfigCreatedEvent,
+    ConfigModifiedEvent,
+    ConfigMovedEvent,
+    ConfigDeletedEvent,
+)
+

@@ -2,23 +2,19 @@ import threading
 
 import pytest
 
-import vcs.workers.config.config_consumer as config_consumer_module
 import vcs.workers.consumer_worker as consumer_worker_module
+from vcs.workers.local.local_queue import LocalQueue
 from vcs.workers.local.local_runtime import LocalRuntime
+from vcs.workers.utils import STOP
 
 
 @pytest.fixture(autouse=True)
 def in_memory_db(monkeypatch):
+    # Both workers now inherit ConsumerWorker.run(), so this is the single
+    # place get_db_url is resolved.
     monkeypatch.setattr(consumer_worker_module, "get_db_url", lambda: ":memory:")
-    monkeypatch.setattr(config_consumer_module, "get_db_url", lambda: ":memory:")
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "docs/issues.md#1: only one of ConsumerWorker/ConfigConsumerWorker ever "
-    "dequeues the single STOP sentinel from their shared queue, so the other "
-    "blocks forever on queue.get() and LocalRuntime.stop() hangs on its "
-    ".join()."
-))
 def test_local_runtime_stop_returns_promptly():
     stop_event = threading.Event()
     runtime = LocalRuntime(sources=[], stop_event=stop_event)
@@ -41,3 +37,17 @@ def test_local_runtime_stop_returns_promptly():
     assert not stopper.is_alive(), (
         "LocalRuntime.stop() did not return within 5s - a worker thread deadlocked"
     )
+    assert not runtime.consumer_worker.is_alive()
+    assert not runtime.config_consumer_worker.is_alive()
+
+
+def test_queue_close_is_idempotent():
+    """VCSRuntime.stop() closes the queue the consumer worker already closed on
+    STOP. close() must tolerate that - it used to call task_done() and raise
+    ValueError('task_done() called too many times') on the second call."""
+    queue = LocalQueue()
+    queue.publish(STOP)
+    assert queue.consume() is STOP
+
+    queue.close()
+    queue.close()  # must not raise

@@ -4,7 +4,16 @@ import pytest
 
 import vcs.workers.local.local_consumer as local_consumer
 from vcs.shared.temp_file import TempFile
-from vcs.shared.types import CreatedEvent, DeletedEvent, ModifiedEvent, MovedEvent
+from vcs.shared.types import (
+    ConfigCreatedEvent,
+    ConfigDeletedEvent,
+    ConfigModifiedEvent,
+    ConfigMovedEvent,
+    CreatedEvent,
+    DeletedEvent,
+    ModifiedEvent,
+    MovedEvent,
+)
 from vcs.workers.local.local_consumer import LocalConsumer
 
 
@@ -44,6 +53,26 @@ def test_handle_dispatches_created_event(monkeypatch):
     consumer.handle(event)
 
     mock.assert_called_once_with("db", event)
+
+
+@pytest.mark.parametrize("event", [
+    ConfigCreatedEvent(),
+    ConfigModifiedEvent(),
+    ConfigDeletedEvent(),
+    ConfigMovedEvent(dst="cfg2"),
+])
+def test_handle_ignores_config_events(monkeypatch, event):
+    """Config events subclass the plain events, so without an explicit guard
+    the isinstance chain would version the config file as ordinary content."""
+    mocks = {}
+    for name in ("moved_handle", "modified_handle", "deleted_handle", "created_handle"):
+        mocks[name] = Mock()
+        monkeypatch.setattr(local_consumer, name, mocks[name])
+
+    LocalConsumer(db_handler="db").handle(event)
+
+    for name, mock in mocks.items():
+        mock.assert_not_called()
 
 
 def test_handle_dispatches_modified_event_with_a_tmp_file_snapshot(monkeypatch, tmp_path):

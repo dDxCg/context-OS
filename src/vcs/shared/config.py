@@ -1,6 +1,13 @@
+import os
 from pathlib import Path
 
-SNAPSHOT_DIR = Path("data/snapshots")
+from utils.helper import anchored
+
+# Anchored to the project root rather than cwd: the MCP server and the VCS
+# runtime are separate processes whose working directories need not match.
+# Env-overridable like DATABASE_URL/SCHEMA_PATH, so a second instance can be
+# pointed at its own data directory.
+SNAPSHOT_DIR = Path(anchored(os.getenv("SNAPSHOT_DIR", "data/snapshots")))
 BLOB_DIR = SNAPSHOT_DIR / "blobs"
 CONFIG_SNAPSHOT_DIR = SNAPSHOT_DIR / "configs"
 CONFIG_SNAPSHOT_FILE = CONFIG_SNAPSHOT_DIR / "config.yaml"

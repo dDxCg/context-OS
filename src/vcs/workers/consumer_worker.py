@@ -1,3 +1,4 @@
+import logging
 import threading
 from typing import Type
 
@@ -25,13 +26,39 @@ class ConsumerWorker(threading.Thread):
             self.stop_event = stop_event
             self.consumer_cls = consumer_cls
 
+    def _configure_consumer(self):
+        """Hook for subclasses to inject collaborators into the consumer.
+
+        The consumer is built inside run(), on the worker thread, so anything it
+        depends on has to be attached there rather than in __init__.
+        """
+        pass
+
     def run(self):
-        self.consumer = self.consumer_cls.from_db_url(get_db_url())
-        while True:
-            event = self.queue.consume()
+        try:
+            self.consumer = self.consumer_cls.from_db_url(get_db_url())
+            self._configure_consumer()
+        except Exception:
+            # Without this the worker dies before its loop starts and the
+            # failure is swallowed by threading.excepthook - the process looks
+            # healthy while silently consuming nothing.
+            logging.exception("[WORKER] failed to start; consuming nothing")
+            return
 
-            if event is STOP:
-                self.queue.close()
-                break
+        try:
+            while True:
+                event = self.queue.consume()
 
-            self.consumer.handle(event)
+                if event is STOP:
+                    break
+
+                try:
+                    self.consumer.handle(event)
+                except Exception:
+                    # One bad event must not take the worker down for the rest
+                    # of the process lifetime. @log_enabled already logged and
+                    # re-raised; this second record is the one saying we
+                    # survived and kept consuming.
+                    logging.exception("[WORKER] handler failed; continuing")
+        finally:
+            self.queue.close()

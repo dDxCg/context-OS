@@ -174,3 +174,134 @@ def test_recover_config_restores_file_from_snapshot(config_path, config_snapshot
     assert config_path.exists()
     restored = yaml.safe_load(config_path.read_text())
     assert restored["sources"][0]["path"] == path_normalize(str(source))
+
+
+def test_derive_watch_targets_maps_file_source_to_its_directory(config_path, tmp_path):
+    """watchdog watches directories; the guardrail grants files."""
+    source_dir = tmp_path / "docs"
+    source_dir.mkdir()
+    source_file = source_dir / "a.txt"
+    source_file.write_text("a")
+    _write_config(config_path, [{"type": "local", "path": str(source_file)}])
+
+    assert configure.derive_watch_targets() == [source_dir.as_posix()]
+
+
+def test_derive_watch_targets_collapses_siblings_to_one_watch(config_path, tmp_path):
+    source_dir = tmp_path / "docs"
+    source_dir.mkdir()
+    for name in ("a.txt", "b.txt", "c.txt"):
+        (source_dir / name).write_text(name)
+    _write_config(config_path, [
+        {"type": "local", "path": str(source_dir / name)}
+        for name in ("a.txt", "b.txt", "c.txt")
+    ])
+
+    assert configure.derive_watch_targets() == [source_dir.as_posix()]
+
+
+def test_derive_watch_targets_drops_directory_covered_by_ancestor(config_path, tmp_path):
+    parent = tmp_path / "docs"
+    child = parent / "nested"
+    child.mkdir(parents=True)
+    _write_config(config_path, [
+        {"type": "local", "path": str(parent)},
+        {"type": "local", "path": str(child)},
+    ])
+
+    assert configure.derive_watch_targets() == [parent.as_posix()]
+
+
+def test_derive_watch_targets_keeps_disjoint_directories(config_path, tmp_path):
+    a = tmp_path / "a"; a.mkdir()
+    b = tmp_path / "b"; b.mkdir()
+    _write_config(config_path, [
+        {"type": "local", "path": str(a)},
+        {"type": "local", "path": str(b)},
+    ])
+
+    assert sorted(configure.derive_watch_targets()) == sorted([a.as_posix(), b.as_posix()])
+
+
+def test_derive_watch_targets_walks_up_to_nearest_existing_dir(config_path, tmp_path):
+    existing = tmp_path / "docs"
+    existing.mkdir()
+    missing = existing / "gone" / "deeper" / "a.txt"
+    _write_config(config_path, [{"type": "local", "path": str(missing)}])
+
+    assert configure.derive_watch_targets() == [existing.as_posix()]
+
+
+def test_derive_watch_targets_skips_source_with_no_existing_ancestor(config_path):
+    """Must not fall back to a filesystem root - that would put the whole disk
+    under the watcher."""
+    _write_config(config_path, [{"type": "local", "path": "Z:/nonexistent/a.txt"}])
+
+    assert configure.derive_watch_targets() == []
+
+
+def test_derive_watch_targets_skips_non_local_sources(config_path, tmp_path):
+    source = tmp_path / "docs"
+    source.mkdir()
+    _write_config(config_path, [
+        {"type": "3rd-party", "path": str(source)},
+    ])
+
+    assert configure.derive_watch_targets() == []
+
+
+def test_add_sources_skips_path_already_covered_by_a_source(config_path, tmp_path):
+    """The guardrail grants one path per approval; without subsumption
+    config.yaml accumulates entries a broader source already covers."""
+    source_dir = tmp_path / "docs"
+    source_dir.mkdir()
+    nested = source_dir / "a.txt"
+    nested.write_text("a")
+    _write_config(config_path, [{"type": "local", "path": str(source_dir)}])
+
+    configure.add_sources([str(nested)])
+
+    saved = yaml.safe_load(config_path.read_text())
+    assert [s["path"] for s in saved["sources"]] == [path_normalize(str(source_dir))]
+
+
+def test_store_config_snapshot_records_the_config_it_was_given(config_path, config_snapshot_file, tmp_path):
+    """The baseline must only advance to state that was actually applied.
+
+    config.yaml can be rewritten while the config consumer works - the MCP
+    guardrail appends one path per approval. If the snapshot re-read the file
+    instead of recording the config the diff was computed from, it would
+    advance past the newer entry and that change would be lost permanently:
+    every later diff reports nothing, since current == snapshot.
+    """
+    a = tmp_path / "a"; a.mkdir()
+    b = tmp_path / "b"; b.mkdir()
+    _write_config(config_path, [{"type": "local", "path": str(a)}])
+    applied = configure.parse_config()
+
+    # A concurrent writer adds b/ after we read but before we snapshot.
+    _write_config(config_path, [
+        {"type": "local", "path": str(a)},
+        {"type": "local", "path": str(b)},
+    ])
+    configure.store_config_snapshot(config_content=applied)
+
+    snapshot = yaml.safe_load(config_snapshot_file.read_text())
+    assert [s["path"] for s in snapshot["sources"]] == [path_normalize(str(a))]
+    # b/ is still pending, so the next diff must surface it.
+    assert configure.get_config_diff()["added"] == [path_normalize(str(b))]
+
+
+def test_get_config_diff_uses_supplied_config(config_path, config_snapshot_file, tmp_path):
+    a = tmp_path / "a"; a.mkdir()
+    b = tmp_path / "b"; b.mkdir()
+    _write_config(config_path, [{"type": "local", "path": str(a)}])
+    configure.store_config_snapshot()
+    supplied = {"sources": [
+        {"type": "local", "path": path_normalize(str(a))},
+        {"type": "local", "path": path_normalize(str(b))},
+    ]}
+
+    diff = configure.get_config_diff(config=supplied)
+
+    assert diff["added"] == [path_normalize(str(b))]
