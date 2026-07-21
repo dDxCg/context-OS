@@ -22,27 +22,35 @@ def test_remove_watch_unregisters_a_previously_added_path():
     assert worker.jobs == []
 
 
-def test_reconcile_adds_missing_and_removes_stale(tmp_path):
-    a = tmp_path / "a"; a.mkdir()
-    b = tmp_path / "b"; b.mkdir()
-    c = tmp_path / "c"; c.mkdir()
-    worker = WatchWorker(threading.Event())
-    cb = lambda event: None
-    worker.reconcile([str(a), str(b)], callback=cb)
+def _mkdir(parent, name):
+    d = parent / name
+    d.mkdir()
+    return d
 
-    worker.reconcile([str(b), str(c)], callback=cb)
+
+def _noop(event):
+    pass
+
+
+def test_reconcile_adds_missing_and_removes_stale(tmp_path):
+    a = _mkdir(tmp_path, "a")
+    b = _mkdir(tmp_path, "b")
+    c = _mkdir(tmp_path, "c")
+    worker = WatchWorker(threading.Event())
+    worker.reconcile([str(a), str(b)], callback=_noop)
+
+    worker.reconcile([str(b), str(c)], callback=_noop)
 
     assert {j[0] for j in worker.jobs} == {b.as_posix(), c.as_posix()}
 
 
 def test_reconcile_is_idempotent(tmp_path):
-    a = tmp_path / "a"; a.mkdir()
+    a = _mkdir(tmp_path, "a")
     worker = WatchWorker(threading.Event())
-    cb = lambda event: None
-    worker.reconcile([str(a)], callback=cb)
+    worker.reconcile([str(a)], callback=_noop)
     first = worker.jobs[0][2]
 
-    worker.reconcile([str(a)], callback=cb)
+    worker.reconcile([str(a)], callback=_noop)
 
     assert len(worker.jobs) == 1
     assert worker.jobs[0][2] is first, "an unchanged watch was needlessly rescheduled"
@@ -51,23 +59,23 @@ def test_reconcile_is_idempotent(tmp_path):
 def test_reconcile_leaves_other_tags_untouched(tmp_path):
     """The config-file watch is owned by LocalRuntime; reconciling source
     watches must never collect it."""
-    cfg = tmp_path / "cfgdir"; cfg.mkdir()
-    a = tmp_path / "a"; a.mkdir()
+    cfg = _mkdir(tmp_path, "cfgdir")
+    a = _mkdir(tmp_path, "a")
     worker = WatchWorker(threading.Event())
-    worker.add_watch(str(cfg), callback=lambda e: None, recursive=False, tag="config")
+    worker.add_watch(str(cfg), callback=_noop, recursive=False, tag="config")
 
-    worker.reconcile([str(a)], callback=lambda e: None, tag="source")
+    worker.reconcile([str(a)], callback=_noop, tag="source")
 
     tags = {j[0]: j[3] for j in worker.jobs}
     assert tags == {cfg.as_posix(): "config", a.as_posix(): "source"}
 
 
 def test_reconcile_to_empty_removes_all_tagged(tmp_path):
-    a = tmp_path / "a"; a.mkdir()
+    a = _mkdir(tmp_path, "a")
     worker = WatchWorker(threading.Event())
-    worker.reconcile([str(a)], callback=lambda e: None)
+    worker.reconcile([str(a)], callback=_noop)
 
-    worker.reconcile([], callback=lambda e: None)
+    worker.reconcile([], callback=_noop)
 
     assert worker.jobs == []
 

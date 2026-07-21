@@ -3,11 +3,10 @@ from pathlib import Path
 from utils.helper import get_config_path
 from vcs.services.configure import derive_watch_targets, is_path_in_scope, parse_config
 from vcs.shared.types import CONFIG_EVENTS
-from vcs.workers.local.local_consumer import LocalConsumer
 from vcs.workers.local.local_queue import LocalQueue
 from vcs.workers.local.local_watcher import WatchWorker
 from vcs.workers.consumer_worker import ConsumerWorker
-from vcs.workers.config.config_consumer import ConfigConsumer, ConfigConsumerWorker
+from vcs.workers.config.config_consumer import ConfigConsumerWorker
 from vcs.workers.utils import STOP
 
 class LocalRuntime:

@@ -9,6 +9,12 @@ def _write_config(path, sources):
     path.write_text(yaml.safe_dump({"sources": sources}))
 
 
+def _mkdir(parent, name):
+    d = parent / name
+    d.mkdir()
+    return d
+
+
 def test_init_config_file_creates_missing_file(config_path):
     assert not config_path.exists()
 
@@ -213,8 +219,8 @@ def test_derive_watch_targets_drops_directory_covered_by_ancestor(config_path, t
 
 
 def test_derive_watch_targets_keeps_disjoint_directories(config_path, tmp_path):
-    a = tmp_path / "a"; a.mkdir()
-    b = tmp_path / "b"; b.mkdir()
+    a = _mkdir(tmp_path, "a")
+    b = _mkdir(tmp_path, "b")
     _write_config(config_path, [
         {"type": "local", "path": str(a)},
         {"type": "local", "path": str(b)},
@@ -274,8 +280,8 @@ def test_store_config_snapshot_records_the_config_it_was_given(config_path, conf
     advance past the newer entry and that change would be lost permanently:
     every later diff reports nothing, since current == snapshot.
     """
-    a = tmp_path / "a"; a.mkdir()
-    b = tmp_path / "b"; b.mkdir()
+    a = _mkdir(tmp_path, "a")
+    b = _mkdir(tmp_path, "b")
     _write_config(config_path, [{"type": "local", "path": str(a)}])
     applied = configure.parse_config()
 
@@ -293,8 +299,8 @@ def test_store_config_snapshot_records_the_config_it_was_given(config_path, conf
 
 
 def test_get_config_diff_uses_supplied_config(config_path, config_snapshot_file, tmp_path):
-    a = tmp_path / "a"; a.mkdir()
-    b = tmp_path / "b"; b.mkdir()
+    a = _mkdir(tmp_path, "a")
+    b = _mkdir(tmp_path, "b")
     _write_config(config_path, [{"type": "local", "path": str(a)}])
     configure.store_config_snapshot()
     supplied = {"sources": [

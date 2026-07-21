@@ -1,6 +1,5 @@
 from pathlib import Path
 
-import pytest
 
 from utils.helper import (
     PROJECT_ROOT,

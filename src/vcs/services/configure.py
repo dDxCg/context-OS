@@ -1,6 +1,5 @@
 from pathlib import Path
 from utils.helper import get_config_path, path_normalize
-from utils.logger import log_enabled
 from vcs.shared.config import CONFIG_SNAPSHOT_FILE
 
 import yaml
