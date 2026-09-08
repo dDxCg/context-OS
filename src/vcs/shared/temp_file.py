@@ -1,9 +1,10 @@
+import os
 from pathlib import Path
 import shutil
-from utils.helper import save_to_file, gen_hash, make_dirs, path_normalize, read_file
+from utils.helper import anchored, save_to_file, gen_hash, make_dirs, path_normalize, read_file
 
 class TempFile:
-    TMP_DIR = Path("data/tmp")
+    TMP_DIR = Path(anchored(os.getenv("TMP_DIR", "data/tmp")))
     def __init__(self, content):
         make_dirs(self.TMP_DIR)
         self.path = Path(f"{self.TMP_DIR}/{gen_hash(content)}.blob")
