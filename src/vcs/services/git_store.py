@@ -3,20 +3,30 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
+from filelock import FileLock
+
 # One lock per repo path, not one global lock - unrelated repos must not
 # block each other once multiple mirror repos exist (git-backend-plan.md's
 # per-directory design). Guarded by _locks_guard so two threads racing to
 # create the *first* lock for a given path can't end up with two different
 # Lock objects for the same repo.
-_locks: dict[str, threading.Lock] = {}
+#
+# A real cross-process file lock, not threading.Lock: the CLI and HTTP API
+# run as separate OS processes from the daemon, and a threading.Lock can't
+# see across that boundary - two processes racing real `git` subprocess
+# calls against the same mirror repo can interleave and corrupt it.
+# filelock.FileLock is documented thread-safe when the same instance is
+# reused, so this dict-of-locks pattern still serializes the daemon's own
+# worker threads exactly as before.
+_locks: dict[str, FileLock] = {}
 _locks_guard = threading.Lock()
 
 
-def _lock_for(repo_path: Path) -> threading.Lock:
+def _lock_for(repo_path: Path) -> FileLock:
     key = str(repo_path.resolve())
     with _locks_guard:
         if key not in _locks:
-            _locks[key] = threading.Lock()
+            _locks[key] = FileLock(str(repo_path / ".chrono-ctx.lock"))
         return _locks[key]
 
 
@@ -223,6 +233,16 @@ def diff(repo_path: Path, relpath: str, rev1: str, rev2: str) -> str:
     result = subprocess.run(
         ["git", "diff", rev1, rev2, "--", relpath],
         cwd=str(repo_path), check=True, capture_output=True, text=True,
+    )
+    return result.stdout
+
+
+def show(repo_path: Path, relpath: str, rev: str) -> bytes:
+    """Content of relpath as of rev."""
+    _require_initialized(repo_path)
+    result = subprocess.run(
+        ["git", "show", f"{rev}:{relpath}"],
+        cwd=str(repo_path), check=True, capture_output=True,
     )
     return result.stdout
 

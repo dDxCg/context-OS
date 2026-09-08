@@ -89,6 +89,49 @@ def test_ac3_check_diff_returns_unified_diff(config_path, tmp_path):
     assert "+line two" in text
 
 
+def test_ac1_rollback_source_restores_old_content_as_new_commit(config_path, tmp_path):
+    source_dir = _source_dir(config_path, tmp_path)
+    tracked = source_dir / "doc.txt"
+    tracked.write_text("v1")
+    watch_targets = [str(source_dir)]
+    repo_path, relpath = mirror_path.resolve_mirror_location(str(tracked), watch_targets)
+    git_store.init_repo(repo_path)
+    v1_rev = git_store.write(repo_path, relpath, b"v1", message="add", author="t <t@chrono-ctx.local>")
+    v2_rev = git_store.write(repo_path, relpath, b"v2", message="update", author="t <t@chrono-ctx.local>")
+
+    new_rev = audit.rollback_source(str(tracked), v1_rev, watch_targets=watch_targets)
+
+    assert new_rev != v1_rev
+    assert new_rev != v2_rev
+    history = git_store.log_history(repo_path, relpath)
+    assert [h["rev"] for h in history] == [new_rev, v2_rev, v1_rev]
+
+
+def test_ac2_rollback_source_writes_content_back_to_real_file(config_path, tmp_path):
+    source_dir = _source_dir(config_path, tmp_path)
+    tracked = source_dir / "doc.txt"
+    tracked.write_text("v1")
+    watch_targets = [str(source_dir)]
+    repo_path, relpath = mirror_path.resolve_mirror_location(str(tracked), watch_targets)
+    git_store.init_repo(repo_path)
+    v1_rev = git_store.write(repo_path, relpath, b"v1", message="add", author="t <t@chrono-ctx.local>")
+    git_store.write(repo_path, relpath, b"v2", message="update", author="t <t@chrono-ctx.local>")
+    tracked.write_text("v2")
+
+    audit.rollback_source(str(tracked), v1_rev, watch_targets=watch_targets)
+
+    assert tracked.read_bytes() == b"v1"
+
+
+def test_ec1_rollback_source_out_of_scope_raises(config_path, tmp_path):
+    _source_dir(config_path, tmp_path)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("nope")
+
+    with pytest.raises(audit.OutOfScopeError):
+        audit.rollback_source(str(outside), "aaa")
+
+
 def test_ec1_get_version_list_out_of_scope_raises(config_path, tmp_path):
     _source_dir(config_path, tmp_path)
     outside = tmp_path / "outside.txt"

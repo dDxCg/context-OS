@@ -10,6 +10,7 @@ from vcs.services.audit import (
     check_diff,
     get_sources,
     get_version_list,
+    rollback_source,
 )
 
 cli = typer.Typer(name = "ctx")
@@ -77,10 +78,14 @@ def rollback(
     version: Annotated[
         str,
         typer.Option("--version", "-v", help="Git rev to roll back to"),
-    ] = None,
+    ] = ...,
 ):
-    typer.echo("rollback not implemented yet", err=True)
-    raise typer.Exit(code=1)
+    try:
+        new_rev = rollback_source(str(path), version)
+    except OutOfScopeError:
+        typer.echo(f"{path}: out of scope", err=True)
+        raise typer.Exit(code=1)
+    typer.echo(f"rolled back {path} to {version}, new version {new_rev}")
 
 @cli.command("diff")
 def show_diff(

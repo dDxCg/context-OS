@@ -1,6 +1,7 @@
 import subprocess
 import threading
 
+import filelock
 import pytest
 
 from vcs.services import git_store
@@ -367,6 +368,36 @@ def test_ac2_log_history_returns_commits_newest_first(initialized_repo):
 
 def test_log_history_empty_for_untracked_path(initialized_repo):
     assert git_store.log_history(initialized_repo, "never-written.txt") == []
+
+
+def test_ac1_show_returns_content_of_relpath_at_rev(initialized_repo):
+    first_rev = git_store.write(
+        initialized_repo, "a.txt", b"v1",
+        message="add a.txt", author="Test Author <test@chrono-ctx.local>",
+    )
+    git_store.write(
+        initialized_repo, "a.txt", b"v2",
+        message="update a.txt", author="Test Author <test@chrono-ctx.local>",
+    )
+
+    assert git_store.show(initialized_repo, "a.txt", first_rev) == b"v1"
+
+
+def test_ac2_lock_for_serializes_across_separate_lock_instances(initialized_repo):
+    """Simulates cross-process locking: a second process would build its own
+    FileLock object pointed at the same lock file, not share this one."""
+    lock1 = git_store._lock_for(initialized_repo)
+    lock2 = filelock.FileLock(lock1.lock_file)
+
+    lock1.acquire()
+    try:
+        with pytest.raises(filelock.Timeout):
+            lock2.acquire(timeout=0.05)
+    finally:
+        lock1.release()
+
+    lock2.acquire(timeout=0.5)
+    lock2.release()
 
 
 def test_ac3_diff_shows_unified_diff_between_two_revs(initialized_repo):

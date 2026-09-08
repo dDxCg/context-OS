@@ -171,10 +171,39 @@ def test_ec3_diff_with_insufficient_history_exits_nonzero(config_path, tmp_path)
     assert result.exit_code != 0
 
 
-def test_ec4_rollback_exits_nonzero_not_implemented(tmp_path):
-    target = tmp_path / "doc.txt"
-    target.write_text("hi")
+def test_ac6_rollback_restores_old_content_and_prints_new_rev(config_path, tmp_path):
+    source_dir = _source_dir(config_path, tmp_path)
+    tracked = source_dir / "doc.txt"
+    tracked.write_text("v1")
+    watch_targets = [str(source_dir)]
+    repo_path, relpath = mirror_path.resolve_mirror_location(str(tracked), watch_targets)
+    git_store.init_repo(repo_path)
+    v1_rev = git_store.write(repo_path, relpath, b"v1", message="add", author="t <t@chrono-ctx.local>")
+    git_store.write(repo_path, relpath, b"v2", message="update", author="t <t@chrono-ctx.local>")
+    tracked.write_text("v2")
 
-    result = runner.invoke(cli_app.cli, ["rollback", str(target)])
+    result = runner.invoke(cli_app.cli, ["rollback", str(tracked), "--version", v1_rev])
+
+    assert result.exit_code == 0
+    assert tracked.read_bytes() == b"v1"
+    assert v1_rev in result.stdout
+
+
+def test_ec4_rollback_missing_version_exits_nonzero(config_path, tmp_path):
+    source_dir = _source_dir(config_path, tmp_path)
+    tracked = source_dir / "doc.txt"
+    tracked.write_text("hi")
+
+    result = runner.invoke(cli_app.cli, ["rollback", str(tracked)])
+
+    assert result.exit_code != 0
+
+
+def test_ec5_rollback_out_of_scope_exits_nonzero(config_path, tmp_path):
+    _source_dir(config_path, tmp_path)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("nope")
+
+    result = runner.invoke(cli_app.cli, ["rollback", str(outside), "--version", "aaa"])
 
     assert result.exit_code != 0

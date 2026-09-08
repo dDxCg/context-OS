@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from vcs.db.sqlite import DBHandler
 from vcs.services import git_store
 from vcs.services.configure import derive_watch_targets, is_path_in_scope
@@ -60,5 +62,22 @@ def check_diff(path: str, v1: str, v2: str, watch_targets: list[str] | None = No
     return git_store.diff(repo_path, relpath, v1, v2)
 
 
-def rollback_source(path, version: int):
-    pass
+def rollback_source(path: str, rev: str, watch_targets: list[str] | None = None) -> str:
+    _check_scope(path)
+    watch_targets = watch_targets if watch_targets is not None else derive_watch_targets()
+    repo_path, relpath = resolve_mirror_location(path, watch_targets)
+    git_store.init_repo(repo_path)
+
+    expected_rev = git_store.head_rev(repo_path, relpath)
+    content = git_store.show(repo_path, relpath, rev)
+
+    actor_label = "cli:rollback"
+    new_rev = git_store.write_with_check(
+        repo_path, relpath, content,
+        message=f"rollback {relpath} to {rev} via {actor_label}",
+        author=f"{actor_label} <cli@chrono-ctx.local>",
+        expected_rev=expected_rev,
+    )
+
+    Path(path).write_bytes(content)
+    return new_rev
