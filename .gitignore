@@ -13,3 +13,5 @@ requirements.in
 *.egg-info
 data/snapshots
 data/repo
+data/ctx.pid
+data/ctx.log

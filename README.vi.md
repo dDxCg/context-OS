@@ -50,6 +50,7 @@ actor attribution, quyết định thiết kế) → [`ARCHITECTURE.md`](ARCHITE
 | MCP tool server | 5 tool (`read/write/create/delete/move_file`) + guardrail thật (elicitation, fail-closed); edit qua MCP đã gắn actor thật qua pending hint watcher nhặt lại | Xong |
 | HTTP API | 3 route read-only (`/v1/sources`, `/history`, `/diff`), fail-closed 403, auth `X-API-Key` (1 key chung, chưa per-caller scope) | Xong |
 | CLI | `source list/add/remove`, `history`, `diff`, `rollback` dùng git rev string xuyên suốt | Xong |
+| `ctx daemon` | Chạy nền watch daemon: detached process + PID file, dừng graceful cross-platform (`SIGTERM`/`CTRL_BREAK_EVENT`), `start/stop/status` | Xong |
 
 ## Tech Stack
 
@@ -76,9 +77,12 @@ cp config.example.yaml config.yaml   # khai báo nguồn cần theo dõi
 Cần `git` trên PATH (storage backend shell ra `git` qua subprocess).
 
 ```bash
-uv run python -m vcs.runtime      # daemon: watch + versioning
+ctx daemon start                  # watch + versioning, chạy nền (PID: data/ctx.pid, log: data/ctx.log)
+ctx daemon status
+ctx daemon stop
+
 uv run python -m app.mcp.server   # MCP server (stdio) — hoặc qua fastmcp.json
-uv run python -m app.api.server   # HTTP API, read-only
+uv run python -m app.api.server   # HTTP API, read-only (cần set HTTP_API_KEY)
 
 ctx source add <path>
 ctx source remove <path>

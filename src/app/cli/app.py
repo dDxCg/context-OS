@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Annotated
 import typer
 
+from app.cli import daemon
 from utils.helper import get_db_url
 from vcs.db.sqlite import DBHandler
 from vcs.services.configure import add_sources, remove_sources, health_check
@@ -15,8 +16,10 @@ from vcs.services.audit import (
 
 cli = typer.Typer(name = "ctx")
 sources_cli = typer.Typer()
+daemon_cli = typer.Typer()
 
 cli.add_typer(sources_cli, name="source")
+cli.add_typer(daemon_cli, name="daemon")
 
 #Path completion
 def complete_path(incomplete: str):
@@ -117,6 +120,30 @@ def show_diff(
         raise typer.Exit(code=1)
 
     typer.echo(text or "no changes")
+
+
+#Daemon
+@daemon_cli.command("start")
+def daemon_start():
+    try:
+        pid = daemon.start()
+    except daemon.DaemonAlreadyRunningError as e:
+        typer.echo(f"daemon already running (pid {e.pid})", err=True)
+        raise typer.Exit(code=1)
+    typer.echo(f"daemon started, pid {pid}")
+
+@daemon_cli.command("stop")
+def daemon_stop():
+    stopped = daemon.stop()
+    typer.echo("daemon stopped" if stopped else "daemon not running")
+
+@daemon_cli.command("status")
+def daemon_status():
+    result = daemon.status()
+    if result["running"]:
+        typer.echo(f"running, pid {result['pid']}")
+    else:
+        typer.echo("stopped")
 
 
 if __name__ == "__main__":

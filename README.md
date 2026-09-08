@@ -52,6 +52,7 @@ actor attribution, design decisions) → [`ARCHITECTURE.md`](ARCHITECTURE.md).
 | MCP tool server | 5 tools (`read/write/create/delete/move_file`) with a real guardrail (elicitation, fail-closed); MCP-triggered edits are actor-attributed via a pending hint the watcher picks up | Done |
 | HTTP API | 3 read-only routes (`/v1/sources`, `/history`, `/diff`), fail-closed 403, `X-API-Key` auth (single shared key, no per-caller scopes yet) | Done |
 | CLI | `source list/add/remove`, `history`, `diff`, `rollback` use git-rev strings throughout | Done |
+| `ctx daemon` | Backgrounds the watch daemon: detached process + PID file, cross-platform graceful stop (`SIGTERM`/`CTRL_BREAK_EVENT`), `start/stop/status` | Done |
 
 ## Tech Stack
 
@@ -78,9 +79,12 @@ cp config.example.yaml config.yaml   # declare the sources to watch
 Requires `git` on PATH (the storage backend shells out to `git`).
 
 ```bash
-uv run python -m vcs.runtime      # daemon: watch + versioning
+ctx daemon start                  # watch + versioning, backgrounded (PID: data/ctx.pid, log: data/ctx.log)
+ctx daemon status
+ctx daemon stop
+
 uv run python -m app.mcp.server   # MCP server (stdio) — or via fastmcp.json
-uv run python -m app.api.server   # HTTP API, read-only
+uv run python -m app.api.server   # HTTP API, read-only (needs HTTP_API_KEY set)
 
 ctx source add <path>
 ctx source remove <path>
