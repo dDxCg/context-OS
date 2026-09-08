@@ -168,19 +168,23 @@ sequenceDiagram
             MCP-->>Agent: {"status": "denied"}
         end
     end
+    MCP->>DB: set_hint(path, "agent:{session_id}", ttl=5s)<br/>[pending_actor_hints table - spec 013]
     MCP->>FS: save_to_file(content, path) [plain I/O only]
     MCP->>Guard: grant.commit() [persists config.yaml *after* success]
     MCP-->>Agent: {"status": "ok"}
     Note over WW: independent process — picks up the write<br/>as an ordinary filesystem event, later,<br/>on its own debounce schedule
     FS-->>WW: FileModifiedEvent
-    WW->>WW: ...same flow as §4.1, actor unset →<br/>"unknown:filesystem" (see §8)
+    WW->>DB: consume_hint(path) [LocalConsumer.handle,<br/>before dispatching to versioning.py]
+    WW->>WW: ...same flow as §4.1, event.actor filled<br/>from the hint (or "unknown:filesystem" if it<br/>already expired / was never set)
 ```
 
 The MCP write tools deliberately do **plain filesystem I/O only** — no
 direct call into `versioning.py`. The watcher already tracks every
 filesystem change independently of who made it; calling both would
-double-commit the same edit. The cost of that decoupling is actor
-attribution — see [§8](#8-known-gaps).
+double-commit the same edit. That decoupling used to cost actor
+attribution entirely; a pending-hint handoff through a shared SQLite table
+(§6.2, spec 013) closes that gap without coupling the two processes
+directly.
 
 ### 4.3 Config hot-reload
 
@@ -287,11 +291,27 @@ real caller today — a rollback racing a concurrent newer commit raises
 `SourceEvent.actor: str | None`. `_resolve_actor()` turns it into a
 `(label, git-author-string)` pair, e.g. `"agent:sess-9f3a"` →
 `"agent:sess-9f3a <agent@chrono-ctx.local>"`, defaulting to
-`"unknown:filesystem"` when unset. Real capture is wired for exactly one
-caller today: the startup directory scan (`local_adapter.py`, labeled
-`"startup:scan"`). Every other path — the watcher's own filesystem events,
-and by extension every MCP-triggered edit (§4.2) — still resolves to the
-generic fallback. Tracked as [issues.md #23](docs/agents/issues.md).
+`"unknown:filesystem"` when unset. Two capture paths are wired: the startup
+directory scan (`local_adapter.py`, labeled `"startup:scan"`), and
+MCP-triggered edits via a **pending actor hint** (spec 013,
+[issues.md #23](docs/agents/issues.md), fixed) — `vcs/services/actor_hints.py`'s
+`set_hint`/`consume_hint` over a `pending_actor_hints` SQLite table, the same
+cross-process-shared store used for identity. The MCP server and the daemon
+are separate processes (an in-memory dict can't bridge them, same
+constraint as the repo lock in §6.1), so an MCP write tool records
+`"agent:{session_id}"` for the path just before its filesystem I/O, and
+`LocalConsumer.handle` consumes it — reads then deletes — right before
+dispatching to `versioning.py`, filling in `event.actor` if the event didn't
+already carry one. A 5s TTL bounds how long a hint can outlive its write
+(covers the watcher's 0.5s debounce plus dispatch latency); an unconsumed
+or expired hint just falls back to `"unknown:filesystem"`, same as before
+spec 013. A raw filesystem edit with no MCP call at all — the case
+[competitive-landscape.md](docs/agents/competitive-landscape.md) flagged as
+a strength to keep watching regardless — still has no identity to capture,
+which is correct: there's nothing to attribute. CLI actor capture stays out
+of scope: no CLI command currently writes content through the watcher path
+(`ctx rollback` attributes its own commit directly via `git_store`, no
+watcher round-trip involved).
 
 ### 6.3 Scope enforcement — two different fail-closed models
 
@@ -322,7 +342,7 @@ same lock.
 ```
 src/
 ├── app/
-│   ├── cli/app.py            # typer CLI (ctx ...) — see §8, not fully wired
+│   ├── cli/app.py            # typer CLI (ctx ...)
 │   ├── mcp/
 │   │   ├── server.py         # FastMCP stdio server, 5 tools
 │   │   └── guardrail.py      # ensure_scope / ScopeGrant
@@ -344,7 +364,8 @@ src/
 │   │   ├── versioning.py     # event handlers: created/modified/deleted/moved
 │   │   ├── git_store.py      # git subprocess primitives, per-repo lock
 │   │   ├── mirror_path.py    # source path → (repo_path, relpath)
-│   │   ├── audit.py          # read-only queries over the git backend
+│   │   ├── audit.py          # queries + rollback_source over the git backend
+│   │   ├── actor_hints.py    # cross-process pending-actor handoff (spec 013)
 │   │   └── db.py             # schema init
 │   └── workers/
 │       ├── bus.py            # LocalEventBus (AMQP-shaped pub/sub)
@@ -368,7 +389,6 @@ re-audited against current code).
 
 Gaps not yet logged there:
 
-- **MCP/CLI actor capture** — §6.2, [issues.md #23](docs/agents/issues.md).
 - **No process supervision** across the three entrypoints (§3) — running the
   full system today means starting the daemon, the MCP server, and the HTTP
   API by hand.
@@ -385,7 +405,9 @@ wired but not usable end-to-end (didn't print output, `ctx diff` still took
 `int` version numbers), and `rollback_source` was a stub — both closed by
 specs [011](docs/specs/011-cli-output-wiring.md) and
 [012](docs/specs/012-rollback-source.md). §6.1's per-repo lock is now a
-cross-process file lock (`filelock`), not `threading.Lock`.
+cross-process file lock (`filelock`), not `threading.Lock`. MCP-triggered
+edits used to always attribute to `unknown:filesystem` — closed by spec
+[013](docs/specs/013-actor-hints.md) (§6.2).
 
 ## 9. Testing
 

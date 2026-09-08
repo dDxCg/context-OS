@@ -47,7 +47,7 @@ actor attribution, quyết định thiết kế) → [`ARCHITECTURE.md`](ARCHITE
 | Git mirror backend | Mỗi watch target một git repo riêng (không phải thư mục nguồn) — least-privilege theo scope | Xong |
 | `audit.py` (`get_sources`/`get_version_list`/`check_diff`) | Đọc lịch sử/diff thật trên git backend | Xong |
 | Config hot-reload | Thêm/xoá nguồn qua `config.yaml` không cần restart daemon | Đang phát triển |
-| MCP tool server | 5 tool (`read/write/create/delete/move_file`) + guardrail thật (elicitation, fail-closed); actor attribution cho edit qua MCP chưa nối | Đang phát triển |
+| MCP tool server | 5 tool (`read/write/create/delete/move_file`) + guardrail thật (elicitation, fail-closed); edit qua MCP đã gắn actor thật qua pending hint watcher nhặt lại | Xong |
 | HTTP API | 3 route read-only (`/v1/sources`, `/history`, `/diff`), fail-closed 403, chưa auth per-caller | Đang phát triển |
 | CLI | `source list/add/remove`, `history`, `diff`, `rollback` dùng git rev string xuyên suốt | Xong |
 
