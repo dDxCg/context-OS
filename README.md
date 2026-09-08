@@ -19,8 +19,11 @@ Dự án đang ở giai đoạn WIP:
   restart): còn 2 issue mở (shared-queue race, config file chưa được watch)
   — xem [docs/issues.md](docs/issues.md).
 - 🚧 **CLI** (`ctx source add/remove/list`, `ctx history/rollback/diff`):
-  khung lệnh đã có, phần audit (`history`, `rollback`, `diff`, `list`) còn là
-  stub (`src/vcs/services/audit.py`).
+  khung lệnh đã có; `src/vcs/services/audit.py` giờ có `get_sources`/
+  `get_version_list`/`check_diff` thật trên git backend, `rollback_source`
+  vẫn là stub (write, cố tình để riêng — xem
+  [docs/specs/009-audit-read-functions.md](docs/specs/009-audit-read-functions.md)).
+  CLI command layer chưa nối vào các hàm này.
 - 🚧 **MCP tool server** (`src/app/mcp/server.py`): tool `read/write/create/
   delete/move_file` bản thân vẫn là stub (chưa nối vào versioning thật), nhưng
   đã có **guardrail** thật — mỗi lời gọi được kiểm tra phạm vi nguồn trong
@@ -30,8 +33,11 @@ Dự án đang ở giai đoạn WIP:
   `config.yaml`, từ chối/không hỗ trợ elicitation thì chặn (fail-closed). Xem
   thiết kế đầy đủ ở [docs/rabbitmq-migration.md](docs/rabbitmq-migration.md)
   (mục "MCP guardrail").
-- ⛔ **HTTP API** (`src/app/api/server.py`): chưa triển khai (toàn bộ đang bị
-  comment out).
+- 🚧 **HTTP API** (`src/app/api/server.py`): đọc-only, 3 route
+  (`GET /v1/sources`, `/v1/history`, `/v1/diff`) trên `audit.py`, fail-closed
+  403 cho path ngoài scope, không có elicitation. Chưa có write endpoint,
+  chưa có auth per-caller (giả định một caller tin cậy, cùng host). Xem
+  [docs/specs/010-audit-http-api.md](docs/specs/010-audit-http-api.md).
 
 ## Kiến trúc
 

@@ -111,12 +111,14 @@ The four requirements above, in dependency order, each now spec'd under
    default, not narrowing away the watcher's broader capture surface, which
    [competitive-landscape.md](competitive-landscape.md) identified as a
    strength to keep).
-2. [spec/actor-attribution.md](spec/actor-attribution.md) also covers
-   commit-message generation — mechanical once identity threading exists,
-   folded into the same spec rather than split out.
-3. [spec/audit-read-api.md](spec/audit-read-api.md) — read-only HTTP surface
-   over `audit.py`, so something other than an MCP client can drive history
-   lookups. Prerequisite for 4.
+2. Done — [007-actor-attribution.md](../specs/007-actor-attribution.md).
+   MCP/CLI actor capture itself still deferred (real callers still pass no
+   `actor`, falling back to `unknown:filesystem`) — see
+   [issues.md](issues.md) #23.
+3. Done — [009-audit-read-functions.md](../specs/009-audit-read-functions.md)
+   (`audit.py`) and [010-audit-http-api.md](../specs/010-audit-http-api.md)
+   (read-only HTTP surface), so something other than an MCP client can
+   drive history lookups. Prerequisite for 4.
 4. [spec/conflict-ux.md](spec/conflict-ux.md) — turned out more concrete than
    expected: the single-writer-lock constraint in
    [git-backend-plan.md](git-backend-plan.md) means there is structurally
