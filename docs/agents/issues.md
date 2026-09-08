@@ -3,11 +3,12 @@
 Found during code review of the worker-abstraction refactor (`3630dc5`) plus the
 uncommitted fix-in-progress on top of it. Ranked most severe first.
 
-Open: **#15, #16, #19, #20**. Fixed: #1-#14 (each with a regression test
-that's no longer `xfail`, except #9 — found and fixed via live-testing) and
-#21, #22 (fixed by the git-backend migration, `dec14a3`, but not
-cross-referenced back here until a 2026-09-09 re-audit). Moot: #17, #18 —
-described a storage model the same migration replaced outright.
+All logged issues are closed as of spec 017 (2026-09-09). Fixed: #1-#14
+(each with a regression test that's no longer `xfail`, except #9 — found
+and fixed via live-testing), #15/#19/#20/#16 (specs 014-017, Tier 3), and
+#21/#22 (fixed by the git-backend migration, `dec14a3`, but not
+cross-referenced back here until the same 2026-09-09 re-audit). Moot: #17,
+#18 — described a storage model the same migration replaced outright.
 
 **#15-#20** were found while planning the config-control CLI and background
 daemon — see [cli-plan.md](cli-plan.md). They are a different class from
@@ -556,7 +557,7 @@ write is picked up by the next event instead of being swallowed.
 
 ---
 
-## 15. Wheel packaging omits `src/utils` — the installed CLI cannot start — OPEN
+## 15. ~~Wheel packaging omits `src/utils` — the installed CLI cannot start~~ — FIXED
 
 **File:** `pyproject.toml:38-39`
 
@@ -587,7 +588,12 @@ still references `vcs/workers/3rd_party/polling_worker.py`, which no longer exis
 **Fix:** add `"src/utils"` to the wheel packages list. Verify with a real build installed
 into a clean venv, not with the editable install.
 
-## 16. No SIGTERM handler — every non-Ctrl+C shutdown skips cleanup — OPEN
+**Fixed:** [014-wheel-packaging-utils.md](../specs/014-wheel-packaging-utils.md).
+`pyproject.toml`'s wheel packages list now includes `"src/utils"`. No `build`/`installer`
+dependency exists in this project to verify an actual install in CI, so the regression test
+pins the packages list itself — the real defect surface.
+
+## 16. ~~No SIGTERM handler — every non-Ctrl+C shutdown skips cleanup~~ — FIXED
 
 **Files:** `src/vcs/runtime.py:19-23`, `src/vcs/workers/local/local_runtime.py:124-127`
 
@@ -614,6 +620,14 @@ to `TerminateProcess` — abrupt, no cleanup, defeating this fix entirely. A sto
 send `CTRL_BREAK_EVENT` (which requires the child to have been spawned with
 `CREATE_NEW_PROCESS_GROUP`); that raises `KeyboardInterrupt` in the child, reusing the path
 the runtime already handles.
+
+**Fixed:** [017-sigterm-handler.md](../specs/017-sigterm-handler.md). `VCSRuntime.run()`
+installs a `SIGTERM` handler that sets `stop_event` (unblocking `LocalRuntime.run()`'s
+polling loop), and `stop()` runs unconditionally after `local_runtime.run()` returns —
+not just on `KeyboardInterrupt` — and is now idempotent, since it's reachable both from a
+signal and a subsequent Ctrl+C. The Windows `CTRL_BREAK_EVENT` side (what an external
+stopper sends) stays out of scope — that's a future process-supervision concern, not
+something `VCSRuntime` itself does.
 
 ## 17. ~~`created_handle` never writes a blob — v1 content is unrecoverable~~ — MOOT
 
@@ -699,7 +713,7 @@ with `_should_commit()` (`versioning.py:88-94`): a text-similarity check
 produces a new commit. See
 [004-versioning-write-path-on-git.md](../specs/004-versioning-write-path-on-git.md).
 
-## 19. `TempFile.TMP_DIR` is cwd-relative — OPEN
+## 19. ~~`TempFile.TMP_DIR` is cwd-relative~~ — FIXED
 
 **File:** `src/vcs/shared/temp_file.py:6`
 
@@ -720,7 +734,11 @@ to start, and `modified_handle` would stage blobs outside the real data director
 evaluated at import, so tests must monkeypatch the attribute rather than an env var (the
 same reason `tests/fixtures/config.py` patches `configure.CONFIG_SNAPSHOT_FILE` directly).
 
-## 20. No WAL mode and no busy timeout — CLI and daemon will contend — OPEN
+**Fixed:** [015-temp-file-anchored-path.md](../specs/015-temp-file-anchored-path.md).
+`TMP_DIR` is now `Path(anchored(os.getenv("TMP_DIR", "data/tmp")))`, matching
+`SNAPSHOT_DIR`'s pattern exactly, env-overridable the same way.
+
+## 20. ~~No WAL mode and no busy timeout — CLI and daemon will contend~~ — FIXED
 
 **File:** `src/vcs/db/sqlite.py:10-12`
 
@@ -746,6 +764,12 @@ even reads commit.
 **Fix:** enable WAL and pass a `timeout` in `from_url`; add `__enter__`/`__exit__` to
 `DBHandler` for short-lived CLI use — it already has `close`/`commit`/`rollback`/`begin`.
 That also fixes the runtime's connection never being closed (issue #16).
+
+**Fixed:** [016-sqlite-wal-timeout.md](../specs/016-sqlite-wal-timeout.md). `from_url` now
+sets `PRAGMA journal_mode=WAL` and passes an explicit `timeout` (default 30s, overridable),
+and `DBHandler` supports `with DBHandler.from_url(...) as db:`. The "related sharp edges"
+(`execute()`'s missing `None`-guard, its `commit=True` default) were left untouched — a
+separate behavior change each, not part of this fix.
 
 ## 21. ~~Deleting a directory leaves every child row active~~ — FIXED
 

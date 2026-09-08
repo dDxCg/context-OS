@@ -381,12 +381,13 @@ src/
 
 ## 8. Known gaps
 
-Full issue log: [docs/agents/issues.md](docs/agents/issues.md). Re-audited
-2026-09-09 against current code: **#15, #16, #19, #20 are still open**;
-**#21, #22** turned out already fixed by the git-backend migration
-(`dec14a3`, spec 006) but were never marked as such; **#17, #18** are moot —
-they described the pre-migration blob/content-hash storage model, which that
-same migration replaced outright.
+Full issue log: [docs/agents/issues.md](docs/agents/issues.md) — every
+logged issue is closed as of specs 014-017 (Tier 3: wheel packaging,
+`TempFile.TMP_DIR` anchoring, SQLite WAL/timeout, SIGTERM handling). #21/#22
+turned out already fixed by the git-backend migration (`dec14a3`, spec 006)
+but were never marked as such until the 2026-09-09 re-audit; #17/#18 were
+moot — they described the pre-migration blob/content-hash storage model,
+which that same migration replaced outright.
 
 Gaps not yet logged there:
 
