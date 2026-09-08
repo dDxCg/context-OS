@@ -3,9 +3,11 @@
 Found during code review of the worker-abstraction refactor (`3630dc5`) plus the
 uncommitted fix-in-progress on top of it. Ranked most severe first.
 
-Open: **#15-#22**. Fixed: #1-#14, each with a regression test that's no
-longer `xfail` (except #9, found and fixed via live-testing rather than a
-unit test — see its entry).
+Open: **#15, #16, #19, #20**. Fixed: #1-#14 (each with a regression test
+that's no longer `xfail`, except #9 — found and fixed via live-testing) and
+#21, #22 (fixed by the git-backend migration, `dec14a3`, but not
+cross-referenced back here until a 2026-09-09 re-audit). Moot: #17, #18 —
+described a storage model the same migration replaced outright.
 
 **#15-#20** were found while planning the config-control CLI and background
 daemon — see [cli-plan.md](cli-plan.md). They are a different class from
@@ -613,7 +615,7 @@ send `CTRL_BREAK_EVENT` (which requires the child to have been spawned with
 `CREATE_NEW_PROCESS_GROUP`); that raises `KeyboardInterrupt` in the child, reusing the path
 the runtime already handles.
 
-## 17. `created_handle` never writes a blob — v1 content is unrecoverable — OPEN
+## 17. ~~`created_handle` never writes a blob — v1 content is unrecoverable~~ — MOOT
 
 **Files:** `src/vcs/services/versioning.py:11-51` (`_append_context`),
 `src/vcs/adapters/local_adapter.py:31-32`
@@ -652,7 +654,14 @@ commands impossible, not merely degraded.
 recovered, which is why `get_version_list` is specced to expose an `available` flag per
 version.
 
-## 18. `modified_handle` has no same-hash guard — every version is duplicated — OPEN
+**Re-audited 2026-09-09, moot.** `dec14a3` ("migrate db + service to use git") replaced the
+separate `BLOB_DIR`/content-hash storage model entirely — `_append_context`
+(`versioning.py:56-61`) now writes content straight into the git mirror repo via
+`git_store.write`, which by construction always creates a real git blob in the same commit
+that records the version. There is no longer a code path that records a version row without
+persisting content. See [004-versioning-write-path-on-git.md](../specs/004-versioning-write-path-on-git.md).
+
+## 18. ~~`modified_handle` has no same-hash guard — every version is duplicated~~ — MOOT
 
 **File:** `src/vcs/services/versioning.py:54-71`
 
@@ -682,6 +691,13 @@ mechanism warrants confirmation during implementation.
 
 **Fix:** reuse `_check_existed_version` in `modified_handle`, exactly as `_append_context`
 already does. Forward-looking only; existing duplicate rows stay.
+
+**Re-audited 2026-09-09, moot.** Same migration replaced the content-hash-equality guard
+with `_should_commit()` (`versioning.py:88-94`): a text-similarity check
+(`NEW_VERSION_THRESHOLD`) against the current file in the mirror repo, run before every
+`modified_handle` write (`versioning.py:76`). Unchanged/near-duplicate content no longer
+produces a new commit. See
+[004-versioning-write-path-on-git.md](../specs/004-versioning-write-path-on-git.md).
 
 ## 19. `TempFile.TMP_DIR` is cwd-relative — OPEN
 
@@ -731,7 +747,7 @@ even reads commit.
 `DBHandler` for short-lived CLI use — it already has `close`/`commit`/`rollback`/`begin`.
 That also fixes the runtime's connection never being closed (issue #16).
 
-## 21. Deleting a directory leaves every child row active — OPEN
+## 21. ~~Deleting a directory leaves every child row active~~ — FIXED
 
 **File:** `src/vcs/services/versioning.py:93` (`deleted_handle`)
 
@@ -774,7 +790,14 @@ rather than `LIKE`: `LIKE` treats `_` as a single-character wildcard and undersc
 common in directory names, so `LIKE '/my_dir/%'` would also match `/myXdir/...`. Full
 design in [dir-events-plan.md](dir-events-plan.md).
 
-## 22. Moving/renaming a directory is a silent no-op — OPEN
+**Re-audited 2026-09-09, confirmed fixed.** `dec14a3` implemented exactly the fix direction
+above: `deleted_handle` (`versioning.py:178-185`) now runs one `UPDATE ... WHERE location = ?
+OR substr(location, 1, ?) = ?`, unconditional on `is_dir`, deactivating the exact path and
+every child row in one statement. See
+[006-directory-subtree-locations.md](../specs/006-directory-subtree-locations.md). This fix
+landed without a cross-reference back to this entry — hence the stale OPEN status until now.
+
+## 22. ~~Moving/renaming a directory is a silent no-op~~ — FIXED
 
 **File:** `src/vcs/services/versioning.py:75` (`moved_handle`)
 
@@ -814,6 +837,14 @@ touching the filesystem, and set `status` from `is_path_in_scope(event.dst)`. `s
 `st_dev` must **not** be rewritten — a rename does not change them, and writing the
 directory's inode onto child rows would corrupt identity. Full design in
 [dir-events-plan.md](dir-events-plan.md).
+
+**Re-audited 2026-09-09, confirmed fixed.** `dec14a3` implemented exactly this: `moved_handle`
+(`versioning.py:98-129`) rewrites the whole subtree via one `substr`-prefixed `UPDATE`
+*before* any filesystem stat, sets `status` from `is_path_in_scope(event.dst)`, and only
+rewrites `st_ino`/`st_dev` on the exact-node branch (guarded by a `try/except
+FileNotFoundError`, never touching the subtree rows). See
+[006-directory-subtree-locations.md](../specs/006-directory-subtree-locations.md). Same stale
+cross-reference gap as #21.
 
 ## 23. ~~MCP-triggered edits always commit to git as `unknown:filesystem`~~ — FIXED
 

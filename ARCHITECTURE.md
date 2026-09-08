@@ -381,11 +381,12 @@ src/
 
 ## 8. Known gaps
 
-Full issue log: [docs/agents/issues.md](docs/agents/issues.md) (some entries
-predate the git-backend migration and may already be moot — e.g. the
-original "v1 content unrecoverable" gap doesn't apply now that
-`created_handle` commits full content immediately; not all entries have been
-re-audited against current code).
+Full issue log: [docs/agents/issues.md](docs/agents/issues.md). Re-audited
+2026-09-09 against current code: **#15, #16, #19, #20 are still open**;
+**#21, #22** turned out already fixed by the git-backend migration
+(`dec14a3`, spec 006) but were never marked as such; **#17, #18** are moot —
+they described the pre-migration blob/content-hash storage model, which that
+same migration replaced outright.
 
 Gaps not yet logged there:
 
