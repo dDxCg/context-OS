@@ -9,9 +9,17 @@ class PathNotWatchedError(ValueError):
 
 
 def repo_dir_name(watch_target: str) -> str:
-    """Deterministic, filesystem-safe directory name for one watch target."""
+    """Deterministic, filesystem-safe directory name for one watch target.
+
+    Must never come out absolute: `GIT_REPO_DIR / repo_dir_name(...)` silently
+    drops GIT_REPO_DIR if the right-hand side looks absolute to pathlib (a
+    real POSIX watch target always starts with "/" after path_normalize).
+    That doesn't happen on Windows - a normalized Windows path looks like
+    "C:/foo", and stripping the colon leaves "C/foo" with no leading
+    separator to begin with - which is why this was never caught locally.
+    """
     normalized = path_normalize(watch_target)
-    return normalized.replace(":", "")
+    return normalized.replace(":", "").lstrip("/")
 
 
 def resolve_mirror_location(source_path: str, watch_targets: list[str]) -> tuple[Path, str]:

@@ -126,7 +126,10 @@ def test_ac4_deleted_handle_on_untracked_path_is_noop(db_handler, tmp_path):
     assert head_rev(repo_path, relpath) is None
 
 
-def test_ac1_moved_handle_renames_within_same_watch_target(db_handler, tmp_path):
+def test_ac1_moved_handle_renames_within_same_watch_target(db_handler, tmp_path, config_path):
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(f"sources:\n  - type: local\n    path: {path_normalize(tmp_path)}\n")
+
     original = tmp_path / "orig.txt"
     original.write_text("data")
     created_handle(db_handler, CreatedEvent(src=str(original)), watch_targets=[str(tmp_path)])
@@ -151,12 +154,19 @@ def test_ac1_moved_handle_renames_within_same_watch_target(db_handler, tmp_path)
     assert len(log.stdout.strip().splitlines()) == 2
 
 
-def test_ac3_moved_handle_across_watch_targets_writes_dst_and_removes_src(db_handler, tmp_path):
+def test_ac3_moved_handle_across_watch_targets_writes_dst_and_removes_src(db_handler, tmp_path, config_path):
     source_a = tmp_path / "a"
     source_a.mkdir()
     source_b = tmp_path / "b"
     source_b.mkdir()
     watch_targets = [str(source_a), str(source_b)]
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        f"sources:\n"
+        f"  - type: local\n    path: {path_normalize(source_a)}\n"
+        f"  - type: local\n    path: {path_normalize(source_b)}\n"
+    )
 
     original = source_a / "doc.txt"
     original.write_text("cross-repo data")

@@ -1,10 +1,13 @@
 import hashlib
 import os
+import re
 from ulid import ULID
 from dotenv import load_dotenv
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 DEFAULT_ENCODING = "utf-8"
+
+_WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
 
 # src/utils/helper.py -> src/utils -> src -> repo root
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -106,6 +109,16 @@ def collect_files(path: str) -> list[Path]:
 
 def path_normalize(path: str) -> str:
     p = Path(path).expanduser()
+    if not p.is_absolute() and _WINDOWS_DRIVE_RE.match(str(path)):
+        # A Windows-absolute path (drive letter + separator) whose host
+        # pathlib flavour doesn't recognize it as absolute - PurePosixPath
+        # has no concept of a drive letter, so on a non-Windows host
+        # resolve(strict=False) below would silently treat it as relative
+        # and prefix it with the CWD. PureWindowsPath parses drive+root
+        # without touching the real filesystem, so this is deterministic
+        # regardless of which OS runs it (e.g. a watch target string
+        # exercised on Linux CI, or migrated from a Windows machine).
+        return PureWindowsPath(path).as_posix()
     p = p.resolve(strict=False)
     return p.as_posix()
     
