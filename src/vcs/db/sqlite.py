@@ -7,8 +7,9 @@ class DBHandler:
         self.conn = conn
 
     @classmethod
-    def from_url(cls, db_url):
-        conn = sqlite3.connect(db_url)
+    def from_url(cls, db_url, timeout: float = 30.0):
+        conn = sqlite3.connect(db_url, timeout=timeout)
+        conn.execute("PRAGMA journal_mode=WAL")
         return cls(conn)
     
     def execute_script(self, script_url):
@@ -54,3 +55,9 @@ class DBHandler:
 
     def begin(self):
         self.execute(commit=False, query=Query(query="BEGIN"))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
