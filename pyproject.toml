@@ -39,7 +39,7 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/app", "src/vcs"]
+packages = ["src/app", "src/vcs", "src/utils"]
 
 [project.scripts]
 ctx = "app.cli.app:cli"
