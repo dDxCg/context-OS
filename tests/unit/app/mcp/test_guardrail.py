@@ -1,3 +1,6 @@
+import sqlite3
+from pathlib import Path
+
 import yaml
 import pytest
 from fastmcp import Client
@@ -6,6 +9,7 @@ from fastmcp.client.elicitation import ElicitResult
 import app.mcp.server as server
 import vcs.services.mirror_path as mirror_path
 from vcs.services import git_store
+from vcs.services.actor_hints import consume_hint
 from vcs.services.configure import derive_watch_targets
 from utils.helper import path_normalize
 
@@ -13,6 +17,16 @@ from utils.helper import path_normalize
 @pytest.fixture(autouse=True)
 def isolate_git_repo_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(mirror_path, "GIT_REPO_DIR", tmp_path / "git-repos")
+
+
+@pytest.fixture
+def db_path(tmp_path, monkeypatch):
+    path = tmp_path / "test.sqlite"
+    conn = sqlite3.connect(str(path))
+    conn.executescript(Path("data/schema.sql").read_text())
+    conn.close()
+    monkeypatch.setattr(server, "get_db_url", lambda: str(path))
+    return path
 
 
 def _write_config(path, sources):
@@ -95,6 +109,25 @@ async def test_write_file_overwrites_existing_content_on_disk(source_dir):
 
     assert result.data == {"status": "ok"}
     assert target.read_text() == "new content"
+
+
+@pytest.mark.anyio
+async def test_ac6_write_file_sets_a_pending_actor_hint(source_dir, db_path):
+    """Spec 013: the watcher can't attribute an MCP-triggered edit without
+    this - it has no other way to know who made the change."""
+    target = source_dir / "doc.txt"
+    target.write_text("old content")
+
+    async with Client(server.mcp, elicitation_handler=_fail_if_called) as client:
+        await client.call_tool("write_file", {"path": str(target), "content": "new content"})
+
+    conn = sqlite3.connect(str(db_path))
+    db_handler = server.DBHandler(conn)
+    actor = consume_hint(db_handler, str(target))
+    conn.close()
+
+    assert actor is not None
+    assert actor.startswith("agent:")
 
 
 @pytest.mark.anyio

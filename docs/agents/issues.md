@@ -815,7 +815,7 @@ touching the filesystem, and set `status` from `is_path_in_scope(event.dst)`. `s
 directory's inode onto child rows would corrupt identity. Full design in
 [dir-events-plan.md](dir-events-plan.md).
 
-## 23. MCP-triggered edits always commit to git as `unknown:filesystem` — OPEN
+## 23. ~~MCP-triggered edits always commit to git as `unknown:filesystem`~~ — FIXED
 
 **Files:** `src/app/mcp/server.py` (`write_file`/`create_file`/`delete_file`/`move_file`),
 `src/utils/formatter.py:normalize_event`, `src/vcs/services/versioning.py:_resolve_actor`
@@ -844,5 +844,13 @@ read and cleared by the watcher's event handler when the matching event fires, w
 later unrelated edit of the same path never inherits a stale binding. Debounce
 (`WatchWorker._should_process`, 0.5s default) and OS event-delivery latency both need to fit
 inside that TTL for the hint to still be there when the event lands.
+
+**Fix:** implemented per that direction —
+[013-actor-hints.md](../specs/013-actor-hints.md). The hint store is a small SQLite table
+(`pending_actor_hints`), not an in-memory dict: the MCP server and the daemon are separate OS
+processes (same constraint spec 012 hit for the repo lock), and SQLite is the store both
+already share. `LocalConsumer.handle` consumes the hint right before dispatching to
+`versioning.py`. CLI actor capture stays out of scope — no CLI command currently writes content
+through the watcher path (`ctx rollback` attributes its own commit directly via `git_store`).
 
 ---

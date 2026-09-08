@@ -20,3 +20,9 @@ CREATE TABLE IF NOT EXISTS locations (
     status INTEGER DEFAULT 1,
     PRIMARY KEY(st_ino, st_dev)
 );
+
+CREATE TABLE IF NOT EXISTS pending_actor_hints (
+    location TEXT PRIMARY KEY,
+    actor TEXT NOT NULL,
+    expires_at REAL NOT NULL
+);

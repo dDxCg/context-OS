@@ -1,10 +1,13 @@
 import shutil
+import sqlite3
 from pathlib import Path
 
 from fastmcp import Context, FastMCP
 
 from app.mcp.guardrail import ensure_scope
-from utils.helper import read_text_file, save_to_file
+from utils.helper import get_db_url, read_text_file, save_to_file
+from vcs.db.sqlite import DBHandler
+from vcs.services.actor_hints import set_hint
 from vcs.services.versioning import current_version
 
 mcp = FastMCP("chrono-ctx")
@@ -23,7 +26,24 @@ IO_ERRORS = (OSError, UnicodeError, shutil.Error)
 # The watcher (vcs/workers/local/local_watcher.py) already tracks every
 # filesystem change independently of who made it (this tool, a human, any
 # other process), so duplicating that tracking here would double-process
-# the same change.
+# the same change. A pending actor hint (docs/specs/013-actor-hints.md) is
+# left for the watcher to pick up, so the resulting commit isn't attributed
+# to the generic "unknown:filesystem" fallback.
+
+
+def _set_actor_hint(path: str, ctx: Context) -> None:
+    """Best-effort: an MCP call must never fail because hint bookkeeping
+    couldn't complete. If the DB/table isn't there yet (MCP started before
+    the daemon ever applied schema.sql), this just no-ops - same as no
+    hint having been set at all."""
+    try:
+        db_handler = DBHandler.from_url(get_db_url())
+        try:
+            set_hint(db_handler, path, f"agent:{ctx.session_id}")
+        finally:
+            db_handler.close()
+    except sqlite3.Error:
+        pass
 
 @mcp.tool()
 async def read_file(path: str, ctx: Context):
@@ -51,6 +71,7 @@ async def write_file(path: str, content: str, ctx: Context):
     grant = await ensure_scope(ctx, path)
     if not grant:
         return DENIED
+    _set_actor_hint(path, ctx)
     try:
         save_to_file(content, path, mode="w")
     except IO_ERRORS as e:
@@ -65,6 +86,7 @@ async def create_file(path: str, content: str, ctx: Context):
     grant = await ensure_scope(ctx, path)
     if not grant:
         return DENIED
+    _set_actor_hint(path, ctx)
     try:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         save_to_file(content, path, mode="w")
@@ -80,6 +102,7 @@ async def delete_file(path: str, ctx: Context):
     grant = await ensure_scope(ctx, path)
     if not grant:
         return DENIED
+    _set_actor_hint(path, ctx)
     try:
         Path(path).unlink()
     except IO_ERRORS as e:
@@ -97,6 +120,8 @@ async def move_file(src: str, dst: str, ctx: Context):
     dst_grant = await ensure_scope(ctx, dst)
     if not dst_grant:
         return {"status": "denied", "reason": "dst out of scope"}
+    _set_actor_hint(src, ctx)
+    _set_actor_hint(dst, ctx)
     try:
         Path(dst).parent.mkdir(parents=True, exist_ok=True)
         shutil.move(src, dst)
