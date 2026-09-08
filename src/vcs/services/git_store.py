@@ -117,12 +117,17 @@ def write(repo_path: Path, relpath: str, content: bytes, message: str, author: s
 
 def head_rev(repo_path: Path, relpath: str) -> str | None:
     """SHA of the most recent commit touching relpath, or None if relpath
-    has no commit history in this repo."""
+    has no commit history in this repo. A repo with zero commits at all
+    (unborn HEAD - reachable when init_repo() ran but every write since has
+    no-op'd, e.g. a delete of something never tracked) makes `git log` exit
+    non-zero rather than print nothing; both cases mean "no history"."""
     _require_initialized(repo_path)
     result = subprocess.run(
         ["git", "log", "-1", "--format=%H", "--", relpath],
-        cwd=str(repo_path), check=True, capture_output=True, text=True,
+        cwd=str(repo_path), capture_output=True, text=True,
     )
+    if result.returncode != 0:
+        return None
     return result.stdout.strip() or None
 
 
@@ -132,6 +137,51 @@ def _rev_parse(repo_path: Path, ref: str) -> str:
         cwd=str(repo_path), check=True, capture_output=True, text=True,
     )
     return result.stdout.strip()
+
+
+def remove(repo_path: Path, relpath: str, message: str, author: str) -> str | None:
+    """Remove relpath (file or directory subtree) from the mirror and
+    commit. -r is harmless on a single file; --ignore-unmatch makes an
+    untracked/already-gone path a clean no-op instead of a
+    CalledProcessError. Returns the new rev, or None if nothing was
+    actually removed."""
+    _require_initialized(repo_path)
+    with _lock_for(repo_path):
+        subprocess.run(
+            ["git", "rm", "-r", "--ignore-unmatch", "--quiet", relpath],
+            cwd=str(repo_path), check=True, capture_output=True,
+        )
+        staged_diff = subprocess.run(
+            ["git", "diff", "--cached", "--quiet"],
+            cwd=str(repo_path),
+        )
+        if staged_diff.returncode == 0:
+            return None
+        subprocess.run(
+            ["git", "commit", f"--author={author}", "-m", message],
+            cwd=str(repo_path), check=True, capture_output=True,
+        )
+        return _rev_parse(repo_path, "HEAD")
+
+
+def move(repo_path: Path, src_relpath: str, dst_relpath: str, message: str, author: str) -> str | None:
+    """git mv src_relpath dst_relpath + commit. Returns the new rev, or
+    None if src_relpath doesn't exist on disk (nothing to move)."""
+    _require_initialized(repo_path)
+    with _lock_for(repo_path):
+        if not (repo_path / src_relpath).exists():
+            return None
+        dst_path = repo_path / dst_relpath
+        dst_path.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["git", "mv", src_relpath, dst_relpath],
+            cwd=str(repo_path), check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "commit", f"--author={author}", "-m", message],
+            cwd=str(repo_path), check=True, capture_output=True,
+        )
+        return _rev_parse(repo_path, "HEAD")
 
 
 def commit_info(repo_path: Path, relpath: str) -> CommitInfo | None:

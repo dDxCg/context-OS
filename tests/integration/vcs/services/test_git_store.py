@@ -270,3 +270,78 @@ def test_ec2_write_with_check_on_uninitialized_repo_raises(repo_path):
             message="add a.txt", author="Test Author <test@chrono-ctx.local>",
             expected_rev="deadbeef",
         )
+
+
+def test_remove_removes_file_and_commits(initialized_repo):
+    git_store.write(
+        initialized_repo, "a.txt", b"hello",
+        message="add a.txt", author="Test Author <test@chrono-ctx.local>",
+    )
+
+    rev = git_store.remove(
+        initialized_repo, "a.txt",
+        message="remove a.txt", author="Test Author <test@chrono-ctx.local>",
+    )
+
+    assert rev is not None
+    assert not (initialized_repo / "a.txt").exists()
+    assert git_store.head_rev(initialized_repo, "a.txt") == rev
+
+
+def test_remove_is_noop_when_nothing_tracked(initialized_repo):
+    rev = git_store.remove(
+        initialized_repo, "never-written.txt",
+        message="remove nothing", author="Test Author <test@chrono-ctx.local>",
+    )
+
+    assert rev is None
+
+
+def test_remove_removes_directory_subtree(initialized_repo):
+    git_store.write(
+        initialized_repo, "dir/a.txt", b"a",
+        message="add dir/a.txt", author="Test Author <test@chrono-ctx.local>",
+    )
+    git_store.write(
+        initialized_repo, "dir/b.txt", b"b",
+        message="add dir/b.txt", author="Test Author <test@chrono-ctx.local>",
+    )
+
+    rev = git_store.remove(
+        initialized_repo, "dir",
+        message="remove dir", author="Test Author <test@chrono-ctx.local>",
+    )
+
+    assert rev is not None
+    assert not (initialized_repo / "dir").exists()
+
+
+def test_move_renames_file_and_commits(initialized_repo):
+    git_store.write(
+        initialized_repo, "a.txt", b"hello",
+        message="add a.txt", author="Test Author <test@chrono-ctx.local>",
+    )
+
+    rev = git_store.move(
+        initialized_repo, "a.txt", "b.txt",
+        message="rename a.txt to b.txt", author="Test Author <test@chrono-ctx.local>",
+    )
+
+    assert rev is not None
+    assert not (initialized_repo / "a.txt").exists()
+    assert (initialized_repo / "b.txt").read_bytes() == b"hello"
+
+    log = subprocess.run(
+        ["git", "-C", str(initialized_repo), "log", "--follow", "--format=%H", "--", "b.txt"],
+        capture_output=True, text=True, check=True,
+    )
+    assert len(log.stdout.strip().splitlines()) == 2
+
+
+def test_move_is_noop_when_source_missing(initialized_repo):
+    rev = git_store.move(
+        initialized_repo, "never-written.txt", "elsewhere.txt",
+        message="move nothing", author="Test Author <test@chrono-ctx.local>",
+    )
+
+    assert rev is None

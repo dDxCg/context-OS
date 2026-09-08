@@ -1,28 +1,35 @@
 
-from vcs.shared.config import BLOB_DIR, NEW_VERSION_THRESHOLD
+from pathlib import Path
+
+from vcs.shared.config import NEW_VERSION_THRESHOLD
 from utils.logger import log_enabled
-from vcs.shared.types import CreatedEvent, ContextEntry, DeletedEvent, MovedEvent, Query, Version, ModifiedEvent
+from vcs.shared.types import CreatedEvent, ContextEntry, DeletedEvent, MovedEvent, Query, ModifiedEvent
 from vcs.db.sqlite import DBHandler
-from utils.helper import text_similarity, bytes_to_string, path_normalize, collect_files, get_path_stats, gen_hash
+from utils.helper import text_similarity, bytes_to_string, path_normalize, collect_files, get_path_stats
 from vcs.shared.temp_file import TempFile
+from vcs.services import git_store
+from vcs.services.configure import derive_watch_targets, is_path_in_scope
+from vcs.services.mirror_path import resolve_mirror_location, PathNotWatchedError
+
+# Actor-identity resolution isn't built yet (docs/specs/actor-attribution.md).
+# This is that spec's already-decided default for an edit with no MCP/CLI
+# caller to attribute - reused here as a literal, not a dependency on it.
+DEFAULT_AUTHOR = "unknown:filesystem <unknown@chrono-ctx.local>"
 
 
 @log_enabled
-def _append_context(db_handler: DBHandler, context_entry: ContextEntry):
-    try:
-        location = context_entry.location
-        loc_stats = get_path_stats(location)
-        st_ino = loc_stats["st_ino"]
-        st_dev = loc_stats["st_dev"]
-        context_id = _check_existed_location(db_handler, location)
+def _append_context(db_handler: DBHandler, context_entry: ContextEntry, watch_targets: list[str]):
+    location = context_entry.location
+    loc_stats = get_path_stats(location)
+    st_ino = loc_stats["st_ino"]
+    st_dev = loc_stats["st_dev"]
+    context_id = _check_existed_location(db_handler, location)
 
+    try:
         db_handler.begin()
         if context_id is not None:
             _sync_location(db_handler, location, commit=False)
             _active_location_by_id(db_handler, context_id, commit=False)
-            if _check_existed_version(db_handler, context_id, context_entry.content_hash):
-                db_handler.commit()
-                return
         else:
             context_id = context_entry.context_id
             add_context = Query(
@@ -30,72 +37,148 @@ def _append_context(db_handler: DBHandler, context_entry: ContextEntry):
                 params = (context_id,)
             )
             add_location = Query(
-                query = """INSERT INTO 
-                        locations (st_ino, st_dev, context_id, location, provider) 
+                query = """INSERT INTO
+                        locations (st_ino, st_dev, context_id, location, provider)
                         VALUES (?, ?, ?, ?, ?)""",
                 params = (st_ino, st_dev, context_id, context_entry.location, context_entry.provider)
             )
-            
+
             db_handler.execute(commit=False, query=add_context)
             db_handler.execute(commit=False, query=add_location)
-
-
-        version_number = _check_current_version(db_handler, context_id)
-        version = Version(version_number = version_number + 1, 
-                          context_id = context_id, 
-                          content_hash = context_entry.content_hash)
-        _append_version(db_handler, version, commit=False)
         db_handler.commit()
     except Exception:
         db_handler.rollback()
-        raise 
+        raise
+
+    repo_path, relpath = resolve_mirror_location(location, watch_targets)
+    git_store.init_repo(repo_path)
+    git_store.write(
+        repo_path, relpath, Path(location).read_bytes(),
+        message=f"created {relpath}", author=DEFAULT_AUTHOR,
+    )
 
 @log_enabled
-def modified_handle(db_handler: DBHandler, event: ModifiedEvent, tmp_file: TempFile) -> bool:
+def modified_handle(db_handler: DBHandler, event: ModifiedEvent, tmp_file: TempFile, watch_targets: list[str] | None = None) -> bool:
+    watch_targets = watch_targets if watch_targets is not None else derive_watch_targets()
     context_id = _get_context_id_by_location(db_handler, event.src)
     if context_id is None:
         create_event = CreatedEvent(src=event.src)
-        return created_handle(db_handler, create_event)
-    current_version = _check_current_version(db_handler, context_id)
-    previous_hash = _get_version_hash(db_handler, context_id, current_version)
-    if _decide_to_append_version(tmp_file, content_hash=previous_hash):
-        new_hash = gen_hash(tmp_file.read_bytes())
-        version = Version(
-            version_number=current_version+1,
-            context_id=context_id,
-            content_hash=new_hash
-        )
-        _append_version(db_handler, version, commit=True)
-        tmp_file.move_tmp_file(BLOB_DIR / f"{new_hash}.blob")
-    else:
+        return created_handle(db_handler, create_event, watch_targets=watch_targets)
+
+    repo_path, relpath = resolve_mirror_location(event.src, watch_targets)
+    git_store.init_repo(repo_path)
+
+    new_content = tmp_file.read_bytes()
+    current_rev = git_store.head_rev(repo_path, relpath)
+    if current_rev is not None and not _should_commit(repo_path, relpath, new_content):
         tmp_file.delete_tmp_file()
-    
+        return
 
-@log_enabled
-def moved_handle(db_handler: DBHandler, event: MovedEvent):
-    loc_stats = get_path_stats(event.dst)
-    st_ino = loc_stats["st_ino"]
-    st_dev = loc_stats["st_dev"]
-    context_id = _get_context_id_by_location(db_handler, event.dst)
-    update_path = Query(
-        query="UPDATE locations SET location = ?, st_ino = ?, st_dev = ? WHERE context_id = ?",
-        params=(event.dst, st_ino, st_dev, context_id),
+    git_store.write(
+        repo_path, relpath, new_content,
+        message=f"modified {relpath}", author=DEFAULT_AUTHOR,
     )
-    db_handler.execute(update_path, commit=True)
-    
-    
-@log_enabled
-def created_handle(db_handler: DBHandler, event: CreatedEvent):
-    context_entry = ContextEntry.from_path(event.src)
-    _append_context(db_handler, context_entry)
+    tmp_file.delete_tmp_file()
+
+
+def _should_commit(repo_path: Path, relpath: str, upcoming_bytes: bytes) -> bool:
+    current_path = repo_path / relpath
+    if not current_path.exists():
+        return True
+    current_bytes = current_path.read_bytes()
+    similarity = text_similarity(bytes_to_string(current_bytes), bytes_to_string(upcoming_bytes))
+    return similarity < NEW_VERSION_THRESHOLD
+
 
 @log_enabled
-def deleted_handle(db_handler: DBHandler, event: DeletedEvent):
+def moved_handle(db_handler: DBHandler, event: MovedEvent, watch_targets: list[str] | None = None):
+    watch_targets = watch_targets if watch_targets is not None else derive_watch_targets()
+    active = 1 if is_path_in_scope(event.dst) else 0
+
+    # Subtree rewrite first, pure SQL, no filesystem access - so a
+    # directory move is immune to event.dst having already changed again
+    # by the time the exact-node branch below tries to stat it.
+    src_prefix = event.src.rstrip("/") + "/"
+    dst_prefix = event.dst.rstrip("/") + "/"
+    subtree_query = Query(
+        query="""UPDATE locations
+                    SET location = ? || substr(location, ?),
+                        status = ?
+                  WHERE substr(location, 1, ?) = ?""",
+        params=(dst_prefix, len(src_prefix) + 1, active, len(src_prefix), src_prefix),
+    )
+    db_handler.execute(subtree_query, commit=True)
+
+    # Exact-node update (single-file rename case). Guarded: a missing dst
+    # (already moved/deleted again, or this event was for a directory with
+    # no row of its own) degrades to a no-op instead of raising.
+    try:
+        loc_stats = get_path_stats(event.dst)
+    except FileNotFoundError:
+        loc_stats = None
+    if loc_stats is not None:
+        context_id = _get_context_id_by_location(db_handler, event.dst)
+        update_path = Query(
+            query="UPDATE locations SET location = ?, st_ino = ?, st_dev = ?, status = ? WHERE context_id = ?",
+            params=(event.dst, loc_stats["st_ino"], loc_stats["st_dev"], active, context_id),
+        )
+        db_handler.execute(update_path, commit=True)
+
+    src_repo_path, src_relpath = resolve_mirror_location(event.src, watch_targets)
+    git_store.init_repo(src_repo_path)
+
+    try:
+        dst_repo_path, dst_relpath = resolve_mirror_location(event.dst, watch_targets)
+    except PathNotWatchedError:
+        # dst isn't under any watch target - no mirror to write it into.
+        # Recorded as a departure, the same way a delete is.
+        git_store.remove(
+            src_repo_path, src_relpath,
+            message=f"moved out of scope: {src_relpath} to {event.dst}", author=DEFAULT_AUTHOR,
+        )
+        return
+
+    if src_repo_path == dst_repo_path:
+        git_store.move(
+            src_repo_path, src_relpath, dst_relpath,
+            message=f"moved {src_relpath} to {dst_relpath}", author=DEFAULT_AUTHOR,
+        )
+    else:
+        # git mv can't span two repos - write the content into the
+        # destination repo (event.dst already exists on disk, the OS move
+        # already happened by the time this event fires) then remove it
+        # from the source repo.
+        git_store.init_repo(dst_repo_path)
+        content = Path(event.dst).read_bytes()
+        git_store.write(
+            dst_repo_path, dst_relpath, content,
+            message=f"moved in from {src_relpath}", author=DEFAULT_AUTHOR,
+        )
+        git_store.remove(
+            src_repo_path, src_relpath,
+            message=f"moved out to {dst_relpath}", author=DEFAULT_AUTHOR,
+        )
+
+
+@log_enabled
+def created_handle(db_handler: DBHandler, event: CreatedEvent, watch_targets: list[str] | None = None):
+    watch_targets = watch_targets if watch_targets is not None else derive_watch_targets()
+    context_entry = ContextEntry.from_path(event.src)
+    _append_context(db_handler, context_entry, watch_targets)
+
+@log_enabled
+def deleted_handle(db_handler: DBHandler, event: DeletedEvent, watch_targets: list[str] | None = None):
+    watch_targets = watch_targets if watch_targets is not None else derive_watch_targets()
+    prefix = event.src.rstrip("/") + "/"
     query = Query(
-        query = "UPDATE locations SET status = 0 WHERE location = ?",
-        params = (event.src,)
+        query = "UPDATE locations SET status = 0 WHERE location = ? OR substr(location, 1, ?) = ?",
+        params = (event.src, len(prefix), prefix)
     )
     db_handler.execute(commit=True, query=query)
+
+    repo_path, relpath = resolve_mirror_location(event.src, watch_targets)
+    git_store.init_repo(repo_path)
+    git_store.remove(repo_path, relpath, message=f"deleted {relpath}", author=DEFAULT_AUTHOR)
 
 @log_enabled
 def sync_source_status(db_handler: DBHandler, sources):
@@ -125,21 +208,6 @@ def sync_source_status(db_handler: DBHandler, sources):
         raise
     
 
-def _check_current_version(db_handler: DBHandler, context_id: str):
-    get_current_version = Query(
-        query = "SELECT COALESCE(MAX(version_number), 0) FROM versions WHERE context_id = ?",
-        params = (context_id,)
-    )
-    result = db_handler.execute(commit=False, query=get_current_version)
-    return result[0][0] 
-
-def _append_version(db_handler: DBHandler, version: Version, commit: bool):
-    create_version = Query(
-            query = "INSERT INTO versions (version_number, context_id, content_hash) VALUES (?, ?, ?)",
-            params = (version.version_number, version.context_id, version.content_hash)
-        )
-    db_handler.execute(commit=commit, query=create_version)
-
 def _get_context_id_by_location(db_handler: DBHandler, location: str):
     loc_stats = get_path_stats(location)
     st_ino = loc_stats["st_ino"]
@@ -151,36 +219,6 @@ def _get_context_id_by_location(db_handler: DBHandler, location: str):
     res = db_handler.execute(commit=False, query=get_context_id)
     return res[0][0] if res else None
 
-    
-def _decide_to_append_version(tmp_file: TempFile, content_hash: str) -> bool:
-    upcoming_blob = tmp_file.read_bytes()
-    current_blob_path = BLOB_DIR / f"{content_hash}.blob"
-    if not current_blob_path.exists():
-        return True
-    current_blob = (BLOB_DIR / f"{content_hash}.blob").read_bytes()
-    similarity = text_similarity(bytes_to_string(current_blob), bytes_to_string(upcoming_blob))
-    if similarity < NEW_VERSION_THRESHOLD:
-        return True
-    return False
-
-def _get_version_hash(db_handler: DBHandler, context_id: str, version_number: int):
-    get_content_hash = Query(
-        query = "SELECT content_hash from versions WHERE context_id = ? AND version_number = ?",
-        params = (context_id, version_number)
-    )
-    res = db_handler.execute(commit=False, query=get_content_hash)
-    return res[0][0] if res else None
-
-
-def _check_existed_version(db_handler: DBHandler, context_id: str, content_hash: str) -> bool:
-    check_content_hash = Query(
-        query = """SELECT 1
-                FROM versions 
-                WHERE context_id = ? AND content_hash = ?""",
-        params = (context_id, content_hash)
-    )
-    result = db_handler.execute(commit=False, query=check_content_hash)
-    return bool(result)
 
 def _check_existed_location(db_handler: DBHandler, location: str):
     loc_stats = get_path_stats(location)

@@ -1,9 +1,9 @@
 import yaml
 import pytest
 
-import vcs.adapters.local_adapter as local_adapter_module
 import vcs.initialize as initialize_module
 import vcs.services.db as db_module
+import vcs.services.mirror_path as mirror_path
 import vcs.shared.config as shared_config
 from vcs.initialize import Initializer
 from vcs.shared.types import Query
@@ -12,17 +12,16 @@ from vcs.shared.types import Query
 @pytest.fixture
 def isolated_bootstrap(tmp_path, config_snapshot_file, monkeypatch):
     """Redirects every real-filesystem side effect Initializer.init() touches
-    (db file, blob dir, config snapshot dir) into tmp_path."""
+    (db file, git mirror dir, config snapshot dir) into tmp_path."""
     db_path = tmp_path / "db.sqlite"
     monkeypatch.setattr(initialize_module, "get_db_url", lambda: str(db_path))
     monkeypatch.setattr(db_module, "get_db_url", lambda: str(db_path))
 
-    blob_dir = tmp_path / "blobs"
-    monkeypatch.setattr(shared_config, "BLOB_DIR", blob_dir)
+    git_repo_dir = tmp_path / "git-repos"
     monkeypatch.setattr(shared_config, "CONFIG_SNAPSHOT_DIR", config_snapshot_file.parent)
-    monkeypatch.setattr(local_adapter_module, "BLOB_DIR", blob_dir)
+    monkeypatch.setattr(mirror_path, "GIT_REPO_DIR", git_repo_dir)
 
-    return {"db_path": db_path, "blob_dir": blob_dir}
+    return {"db_path": db_path, "git_repo_dir": git_repo_dir}
 
 
 def test_init_bootstraps_schema_config_snapshot_and_local_sources(
@@ -44,11 +43,12 @@ def test_init_bootstraps_schema_config_snapshot_and_local_sources(
         contexts = initializer.db_handler.execute(Query("SELECT context_id FROM contexts"), commit=False)
         versions = initializer.db_handler.execute(Query("SELECT content_hash FROM versions"), commit=False)
         assert len(contexts) == 1
-        assert len(versions) == 1
+        assert versions == []
 
-        blob_dir = isolated_bootstrap["blob_dir"]
-        assert blob_dir.exists()
-        assert any(blob_dir.iterdir())
+        repo_path, relpath = mirror_path.resolve_mirror_location(
+            str(source_dir / "doc.txt"), [str(source_dir)]
+        )
+        assert (repo_path / relpath).read_bytes() == b"hello world"
 
         assert config_snapshot_file.exists()
         snapshot = yaml.safe_load(config_snapshot_file.read_text())

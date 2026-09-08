@@ -9,6 +9,7 @@ from utils.helper import anchored
 # pointed at its own data directory.
 SNAPSHOT_DIR = Path(anchored(os.getenv("SNAPSHOT_DIR", "data/snapshots")))
 BLOB_DIR = SNAPSHOT_DIR / "blobs"
+GIT_REPO_DIR = Path(anchored(os.getenv("GIT_REPO_DIR", "data/repo")))
 CONFIG_SNAPSHOT_DIR = SNAPSHOT_DIR / "configs"
 CONFIG_SNAPSHOT_FILE = CONFIG_SNAPSHOT_DIR / "config.yaml"
 NEW_VERSION_THRESHOLD = 0.9
