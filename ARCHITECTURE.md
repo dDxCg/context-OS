@@ -256,13 +256,21 @@ commit metadata into SQLite.
 
 ### 6.1 Concurrency
 
-One `threading.Lock` per resolved repo path (module-level dict, guarded by
-its own lock against two threads racing to create the first `Lock` for a
-given path) serializes every git-mutating call (`add`/`rm`/`mv`/`commit`)
-against that repo — required because `.git/index.lock` doesn't arbitrate
-concurrent writers the way SQLite's WAL mode does. Different repos never
-block each other. The runtime's source-event consumer and config-event
-consumer run on separate threads and both funnel through this lock.
+One cross-process file lock (`filelock.FileLock`, a `.chrono-ctx.lock` file
+inside each mirror repo) per resolved repo path (module-level dict, guarded
+by its own `threading.Lock` against two threads racing to create the first
+lock object for a given path) serializes every git-mutating call
+(`add`/`rm`/`mv`/`commit`) against that repo — required because
+`.git/index.lock` doesn't arbitrate concurrent writers the way SQLite's WAL
+mode does. Different repos never block each other. A real OS-level file
+lock, not a `threading.Lock` (spec 012): the CLI and HTTP API run as
+separate processes from the daemon, and a `threading.Lock` can't see across
+a process boundary — two processes racing real `git` subprocess calls
+against the same mirror repo could otherwise interleave and corrupt it.
+`filelock.FileLock` is documented thread-safe when the same instance is
+reused, so the daemon's own two worker threads (source-event and
+config-event consumers) still serialize through one shared instance exactly
+as before.
 
 **"Conflict" is reframed as lost-update, not merge-conflict.** Because of
 the single-writer lock plus linear per-repo history, this system can
@@ -270,7 +278,9 @@ structurally never produce a real git merge conflict — only a stale-read
 overwrite. `write_with_check(expected_rev=...)` is an optimistic
 compare-and-swap: if the mirror's current head has moved past
 `expected_rev`, it raises `ConcurrentEditError` with the current rev/author/
-timestamp instead of committing.
+timestamp instead of committing. `rollback_source` (spec 012) is its one
+real caller today — a rollback racing a concurrent newer commit raises
+`ConcurrentEditError` instead of clobbering it.
 
 ### 6.2 Actor attribution
 
@@ -358,20 +368,24 @@ re-audited against current code).
 
 Gaps not yet logged there:
 
-- **CLI is wired but not usable end-to-end.** `ctx history`/`diff`/`rollback`
-  call `audit.py` but never print or return the result. `ctx diff` also
-  still takes `--from`/`--to` as `int` version numbers, which no longer
-  matches `audit.check_diff`'s git-rev-string contract after spec 009.
 - **MCP/CLI actor capture** — §6.2, [issues.md #23](docs/agents/issues.md).
 - **No process supervision** across the three entrypoints (§3) — running the
   full system today means starting the daemon, the MCP server, and the HTTP
   API by hand.
 - **No auth model** on the HTTP API or a per-caller scope — both assume a
   single trusted, same-host caller.
-- **`rollback_source`** (`audit.py`) is still a stub. Per
-  [git-backend-plan.md](docs/agents/git-backend-plan.md), a rollback should
-  route through the daemon rather than have a second process (CLI/HTTP)
-  touch the mirror repo directly outside the writer lock — not implemented.
+- **No HTTP write endpoint for rollback.** `ctx rollback` (CLI-only, spec
+  012) covers the interactive case; a remote/HTTP rollback trigger is still
+  out of scope, same reasoning as
+  [010-audit-http-api.md](docs/specs/010-audit-http-api.md)'s read-only
+  scoping.
+
+Resolved since first written (kept here for the trail): the CLI used to be
+wired but not usable end-to-end (didn't print output, `ctx diff` still took
+`int` version numbers), and `rollback_source` was a stub — both closed by
+specs [011](docs/specs/011-cli-output-wiring.md) and
+[012](docs/specs/012-rollback-source.md). §6.1's per-repo lock is now a
+cross-process file lock (`filelock`), not `threading.Lock`.
 
 ## 9. Testing
 

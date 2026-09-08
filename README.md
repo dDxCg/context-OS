@@ -51,8 +51,7 @@ actor attribution, design decisions) → [`ARCHITECTURE.md`](ARCHITECTURE.md).
 | Config hot-reload | Add/remove sources via `config.yaml` without restarting the daemon | In progress |
 | MCP tool server | 5 tools (`read/write/create/delete/move_file`) with a real guardrail (elicitation, fail-closed); actor attribution for MCP-triggered edits not wired yet | In progress |
 | HTTP API | 3 read-only routes (`/v1/sources`, `/history`, `/diff`), fail-closed 403, no per-caller auth yet | In progress |
-| CLI | Command scaffolding calls `audit.py`/`configure.py` correctly but doesn't print output yet; `ctx diff` still takes an `int` version, mismatched with `audit.check_diff`'s git-rev-string contract | In progress |
-| `rollback_source` | Write surface, deliberately left out | Not started |
+| CLI | `source list/add/remove`, `history`, `diff`, `rollback` use git-rev strings throughout | Done |
 
 ## Tech Stack
 

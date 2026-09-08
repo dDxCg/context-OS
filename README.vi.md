@@ -49,8 +49,7 @@ actor attribution, quyết định thiết kế) → [`ARCHITECTURE.md`](ARCHITE
 | Config hot-reload | Thêm/xoá nguồn qua `config.yaml` không cần restart daemon | Đang phát triển |
 | MCP tool server | 5 tool (`read/write/create/delete/move_file`) + guardrail thật (elicitation, fail-closed); actor attribution cho edit qua MCP chưa nối | Đang phát triển |
 | HTTP API | 3 route read-only (`/v1/sources`, `/history`, `/diff`), fail-closed 403, chưa auth per-caller | Đang phát triển |
-| CLI | Khung lệnh gọi đúng `audit.py`/`configure.py` nhưng chưa in kết quả ra output; `ctx diff` còn dùng version kiểu `int`, lệch với `audit.check_diff` (git rev string) | Đang phát triển |
-| `rollback_source` | Write surface, cố tình để riêng | Chưa phát triển |
+| CLI | `source list/add/remove`, `history`, `diff`, `rollback` dùng git rev string xuyên suốt | Xong |
 
 ## Tech Stack
 
