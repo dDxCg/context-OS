@@ -190,6 +190,19 @@ def deleted_handle(db_handler: DBHandler, event: DeletedEvent, watch_targets: li
     git_store.remove(repo_path, relpath, message=f"deleted {relpath} via {actor_label}", author=author)
 
 @log_enabled
+def current_version(path: str, watch_targets: list[str] | None = None) -> str | None:
+    """HEAD rev of path in its mirror repo, or None if it has no commit
+    history yet, or isn't under any watch target."""
+    watch_targets = watch_targets if watch_targets is not None else derive_watch_targets()
+    try:
+        repo_path, relpath = resolve_mirror_location(path, watch_targets)
+    except PathNotWatchedError:
+        return None
+    git_store.init_repo(repo_path)
+    return git_store.head_rev(repo_path, relpath)
+
+
+@log_enabled
 def sync_source_status(db_handler: DBHandler, sources):
     try:
         db_handler.begin()

@@ -5,6 +5,7 @@ from fastmcp import Context, FastMCP
 
 from app.mcp.guardrail import ensure_scope
 from utils.helper import read_text_file, save_to_file
+from vcs.services.versioning import current_version
 
 mcp = FastMCP("chrono-ctx")
 
@@ -38,7 +39,7 @@ async def read_file(path: str, ctx: Context):
     return {
         "status": "ok",
         "content": content,
-        "version": None,
+        "version": current_version(path),
         # True when bytes could not be decoded as UTF-8 and were replaced -
         # the file is not text (typically binary). Content is degraded; do
         # not write it back.

@@ -7,6 +7,7 @@ from vcs.services.git_store import head_rev
 from vcs.services.versioning import (
     _resolve_actor,
     created_handle,
+    current_version,
     deleted_handle,
     modified_handle,
     moved_handle,
@@ -473,6 +474,32 @@ def test_ac6_modified_handle_delegation_preserves_actor(db_handler, tmp_path):
         capture_output=True, text=True, check=True,
     )
     assert log.stdout.strip() == "cli:jane <cli@chrono-ctx.local>"
+
+
+def test_ac1_current_version_returns_head_rev_when_history_exists(db_handler, tmp_path):
+    watched_file = tmp_path / "doc.txt"
+    watched_file.write_text("hello world")
+
+    created_handle(
+        db_handler, CreatedEvent(src=str(watched_file)), watch_targets=[str(tmp_path)]
+    )
+
+    repo_path, relpath = mirror_path.resolve_mirror_location(str(watched_file), [str(tmp_path)])
+    assert current_version(str(watched_file), watch_targets=[str(tmp_path)]) == head_rev(repo_path, relpath)
+
+
+def test_ac2_current_version_returns_none_when_no_history(tmp_path):
+    watched_file = tmp_path / "never-committed.txt"
+    watched_file.write_text("hi")
+
+    assert current_version(str(watched_file), watch_targets=[str(tmp_path)]) is None
+
+
+def test_ec1_current_version_returns_none_when_path_not_watched(tmp_path):
+    unwatched_file = tmp_path / "elsewhere.txt"
+    unwatched_file.write_text("hi")
+
+    assert current_version(str(unwatched_file), watch_targets=[str(tmp_path / "other")]) is None
 
 
 def test_sync_source_status_deactivates_missing_and_reactivates_present(db_handler, tmp_path):

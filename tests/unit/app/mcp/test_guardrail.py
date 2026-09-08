@@ -4,7 +4,15 @@ from fastmcp import Client
 from fastmcp.client.elicitation import ElicitResult
 
 import app.mcp.server as server
+import vcs.services.mirror_path as mirror_path
+from vcs.services import git_store
+from vcs.services.configure import derive_watch_targets
 from utils.helper import path_normalize
+
+
+@pytest.fixture(autouse=True)
+def isolate_git_repo_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(mirror_path, "GIT_REPO_DIR", tmp_path / "git-repos")
 
 
 def _write_config(path, sources):
@@ -43,6 +51,26 @@ async def test_read_file_returns_content_for_in_scope_path(source_dir):
     assert result.data == {
         "status": "ok", "content": "hello world", "version": None, "lossy": False
     }
+
+
+@pytest.mark.anyio
+async def test_ac1_read_file_returns_real_version_when_mirror_has_history(source_dir):
+    """Spec 008 AC-1: a path already committed into its mirror (e.g. by the
+    watcher) reports that commit's rev instead of the hardcoded None."""
+    target = source_dir / "doc.txt"
+    target.write_text("hello world")
+    watch_targets = derive_watch_targets()
+    repo_path, relpath = mirror_path.resolve_mirror_location(str(target), watch_targets)
+    git_store.init_repo(repo_path)
+    expected_rev = git_store.write(
+        repo_path, relpath, b"hello world",
+        message="seed", author="test <test@chrono-ctx.local>",
+    )
+
+    async with Client(server.mcp, elicitation_handler=_fail_if_called) as client:
+        result = await client.call_tool("read_file", {"path": str(target)})
+
+    assert result.data["version"] == expected_rev
 
 
 @pytest.mark.anyio
