@@ -57,6 +57,7 @@ class SourceEvent:
     type: str
     provider: str = "local"
     is_dir: bool = False
+    actor: str | None = None
 
 @dataclass
 class CreatedEvent(SourceEvent):
@@ -150,6 +151,7 @@ def event_to_dict(event) -> dict:
         "src": event.src,
         "provider": event.provider,
         "is_dir": event.is_dir,
+        "actor": event.actor,
     }
     dst = getattr(event, "dst", None)
     if dst is not None:
@@ -173,6 +175,7 @@ def event_from_dict(data: dict):
         "src": data["src"],
         "provider": data.get("provider", "local"),
         "is_dir": data.get("is_dir", False),
+        "actor": data.get("actor"),
     }
     if issubclass(cls, MovedEvent):
         kwargs["dst"] = data["dst"]

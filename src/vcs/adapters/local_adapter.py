@@ -9,6 +9,13 @@ from vcs.db.sqlite import DBHandler
 from vcs.services.configure import derive_watch_targets
 from vcs.services.versioning import _append_context
 
+# Startup scan is a well-known, distinct origin - not the generic
+# "unknown:filesystem" fallback _resolve_actor uses for a bare watcher
+# event with no event.actor set.
+STARTUP_ACTOR_LABEL = "startup:scan"
+STARTUP_AUTHOR = f"{STARTUP_ACTOR_LABEL} <startup@chrono-ctx.local>"
+
+
 class LocalAdapter:
     def __init__(self, db_handler: DBHandler):
         self.db_handler = db_handler
@@ -31,7 +38,10 @@ class LocalAdapter:
         # git_store commits the content (see versioning._append_context) -
         # no separate BLOB_DIR write here anymore; that was this path's own
         # duplicate of what created_handle's watcher path does.
-        _append_context(self.db_handler, context_entry, watch_targets)
+        _append_context(
+            self.db_handler, context_entry, watch_targets,
+            STARTUP_ACTOR_LABEL, STARTUP_AUTHOR,
+        )
 
     def local_directory_processing(self, dir_path, watch_targets: list[str] | None = None):
         watch_targets = watch_targets if watch_targets is not None else derive_watch_targets()

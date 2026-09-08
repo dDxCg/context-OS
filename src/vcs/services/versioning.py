@@ -11,14 +11,17 @@ from vcs.services import git_store
 from vcs.services.configure import derive_watch_targets, is_path_in_scope
 from vcs.services.mirror_path import resolve_mirror_location, PathNotWatchedError
 
-# Actor-identity resolution isn't built yet (docs/specs/actor-attribution.md).
-# This is that spec's already-decided default for an edit with no MCP/CLI
-# caller to attribute - reused here as a literal, not a dependency on it.
-DEFAULT_AUTHOR = "unknown:filesystem <unknown@chrono-ctx.local>"
+def _resolve_actor(event) -> tuple[str, str]:
+    """(label, git-author-string) for event.actor, defaulting to the
+    filesystem-origin label when unset (every real caller today, until MCP
+    tool wiring / CLI capture actor - see docs/specs/007-actor-attribution.md)."""
+    actor = getattr(event, "actor", None) or "unknown:filesystem"
+    name, _, _ = actor.partition(":")
+    return actor, f"{actor} <{name}@chrono-ctx.local>"
 
 
 @log_enabled
-def _append_context(db_handler: DBHandler, context_entry: ContextEntry, watch_targets: list[str]):
+def _append_context(db_handler: DBHandler, context_entry: ContextEntry, watch_targets: list[str], actor_label: str, author: str):
     location = context_entry.location
     loc_stats = get_path_stats(location)
     st_ino = loc_stats["st_ino"]
@@ -54,7 +57,7 @@ def _append_context(db_handler: DBHandler, context_entry: ContextEntry, watch_ta
     git_store.init_repo(repo_path)
     git_store.write(
         repo_path, relpath, Path(location).read_bytes(),
-        message=f"created {relpath}", author=DEFAULT_AUTHOR,
+        message=f"created {relpath} via {actor_label}", author=author,
     )
 
 @log_enabled
@@ -62,7 +65,7 @@ def modified_handle(db_handler: DBHandler, event: ModifiedEvent, tmp_file: TempF
     watch_targets = watch_targets if watch_targets is not None else derive_watch_targets()
     context_id = _get_context_id_by_location(db_handler, event.src)
     if context_id is None:
-        create_event = CreatedEvent(src=event.src)
+        create_event = CreatedEvent(src=event.src, actor=event.actor)
         return created_handle(db_handler, create_event, watch_targets=watch_targets)
 
     repo_path, relpath = resolve_mirror_location(event.src, watch_targets)
@@ -74,9 +77,10 @@ def modified_handle(db_handler: DBHandler, event: ModifiedEvent, tmp_file: TempF
         tmp_file.delete_tmp_file()
         return
 
+    actor_label, author = _resolve_actor(event)
     git_store.write(
         repo_path, relpath, new_content,
-        message=f"modified {relpath}", author=DEFAULT_AUTHOR,
+        message=f"modified {relpath} via {actor_label}", author=author,
     )
     tmp_file.delete_tmp_file()
 
@@ -124,6 +128,8 @@ def moved_handle(db_handler: DBHandler, event: MovedEvent, watch_targets: list[s
         )
         db_handler.execute(update_path, commit=True)
 
+    actor_label, author = _resolve_actor(event)
+
     src_repo_path, src_relpath = resolve_mirror_location(event.src, watch_targets)
     git_store.init_repo(src_repo_path)
 
@@ -134,14 +140,15 @@ def moved_handle(db_handler: DBHandler, event: MovedEvent, watch_targets: list[s
         # Recorded as a departure, the same way a delete is.
         git_store.remove(
             src_repo_path, src_relpath,
-            message=f"moved out of scope: {src_relpath} to {event.dst}", author=DEFAULT_AUTHOR,
+            message=f"moved out of scope: {src_relpath} to {event.dst} via {actor_label}",
+            author=author,
         )
         return
 
     if src_repo_path == dst_repo_path:
         git_store.move(
             src_repo_path, src_relpath, dst_relpath,
-            message=f"moved {src_relpath} to {dst_relpath}", author=DEFAULT_AUTHOR,
+            message=f"moved {src_relpath} to {dst_relpath} via {actor_label}", author=author,
         )
     else:
         # git mv can't span two repos - write the content into the
@@ -152,11 +159,11 @@ def moved_handle(db_handler: DBHandler, event: MovedEvent, watch_targets: list[s
         content = Path(event.dst).read_bytes()
         git_store.write(
             dst_repo_path, dst_relpath, content,
-            message=f"moved in from {src_relpath}", author=DEFAULT_AUTHOR,
+            message=f"moved in from {src_relpath} via {actor_label}", author=author,
         )
         git_store.remove(
             src_repo_path, src_relpath,
-            message=f"moved out to {dst_relpath}", author=DEFAULT_AUTHOR,
+            message=f"moved out to {dst_relpath} via {actor_label}", author=author,
         )
 
 
@@ -164,7 +171,8 @@ def moved_handle(db_handler: DBHandler, event: MovedEvent, watch_targets: list[s
 def created_handle(db_handler: DBHandler, event: CreatedEvent, watch_targets: list[str] | None = None):
     watch_targets = watch_targets if watch_targets is not None else derive_watch_targets()
     context_entry = ContextEntry.from_path(event.src)
-    _append_context(db_handler, context_entry, watch_targets)
+    actor_label, author = _resolve_actor(event)
+    _append_context(db_handler, context_entry, watch_targets, actor_label, author)
 
 @log_enabled
 def deleted_handle(db_handler: DBHandler, event: DeletedEvent, watch_targets: list[str] | None = None):
@@ -178,7 +186,8 @@ def deleted_handle(db_handler: DBHandler, event: DeletedEvent, watch_targets: li
 
     repo_path, relpath = resolve_mirror_location(event.src, watch_targets)
     git_store.init_repo(repo_path)
-    git_store.remove(repo_path, relpath, message=f"deleted {relpath}", author=DEFAULT_AUTHOR)
+    actor_label, author = _resolve_actor(event)
+    git_store.remove(repo_path, relpath, message=f"deleted {relpath} via {actor_label}", author=author)
 
 @log_enabled
 def sync_source_status(db_handler: DBHandler, sources):

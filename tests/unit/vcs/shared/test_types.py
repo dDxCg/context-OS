@@ -98,3 +98,23 @@ def test_unregistered_event_type_is_rejected():
 
     with pytest.raises(ValueError):
         event_name(Rogue(src="/a"))
+
+
+def test_ac1_actor_defaults_to_none_and_round_trips_backward_compatibly():
+    event = CreatedEvent(src="/a/x.txt")
+    assert event.actor is None
+
+    restored = event_from_dict(event_to_dict(event))
+    assert restored.actor is None
+
+    # a dict serialized before "actor" existed has no such key at all
+    legacy_dict = {"event": "source.created", "src": "/a/x.txt", "provider": "local", "is_dir": False}
+    assert event_from_dict(legacy_dict).actor is None
+
+
+def test_ac2_actor_round_trips_when_set():
+    event = CreatedEvent(src="/a/x.txt", actor="agent:sess-9f3a")
+
+    restored = event_from_dict(event_to_dict(event))
+
+    assert restored.actor == "agent:sess-9f3a"

@@ -1,8 +1,11 @@
 import pytest
 
+import subprocess
+
 import vcs.services.mirror_path as mirror_path
 from vcs.services.git_store import head_rev
 from vcs.services.versioning import (
+    _resolve_actor,
     created_handle,
     deleted_handle,
     modified_handle,
@@ -416,6 +419,60 @@ def test_ec1_created_handle_outside_watch_targets_raises_path_not_watched(db_han
         created_handle(
             db_handler, CreatedEvent(src=str(watched_file)), watch_targets=[str(other_dir)]
         )
+
+
+def test_ac3_resolve_actor_formats_git_author_from_actor_string():
+    event = CreatedEvent(src="/a/x.txt", actor="agent:sess-9f3a")
+
+    label, author = _resolve_actor(event)
+
+    assert label == "agent:sess-9f3a"
+    assert author == "agent:sess-9f3a <agent@chrono-ctx.local>"
+
+
+def test_ac4_resolve_actor_defaults_when_actor_is_none():
+    event = CreatedEvent(src="/a/x.txt")
+
+    label, author = _resolve_actor(event)
+
+    assert label == "unknown:filesystem"
+    assert author == "unknown:filesystem <unknown@chrono-ctx.local>"
+
+
+def test_ac5_created_handle_uses_event_actor_in_author_and_message(db_handler, tmp_path):
+    watched_file = tmp_path / "doc.txt"
+    watched_file.write_text("hello")
+
+    created_handle(
+        db_handler, CreatedEvent(src=str(watched_file), actor="cli:jane"),
+        watch_targets=[str(tmp_path)],
+    )
+
+    repo_path, relpath = mirror_path.resolve_mirror_location(str(watched_file), [str(tmp_path)])
+    log = subprocess.run(
+        ["git", "-C", str(repo_path), "log", "-1", "--format=%an <%ae>|%s"],
+        capture_output=True, text=True, check=True,
+    )
+    author, message = log.stdout.strip().split("|", 1)
+    assert author == "cli:jane <cli@chrono-ctx.local>"
+    assert message.endswith("via cli:jane")
+
+
+def test_ac6_modified_handle_delegation_preserves_actor(db_handler, tmp_path):
+    watched_file = tmp_path / "new.txt"
+    watched_file.write_text("brand new")
+
+    modified_handle(
+        db_handler, ModifiedEvent(src=str(watched_file), actor="cli:jane"), tmp_file=None,
+        watch_targets=[str(tmp_path)],
+    )
+
+    repo_path, relpath = mirror_path.resolve_mirror_location(str(watched_file), [str(tmp_path)])
+    log = subprocess.run(
+        ["git", "-C", str(repo_path), "log", "-1", "--format=%an <%ae>"],
+        capture_output=True, text=True, check=True,
+    )
+    assert log.stdout.strip() == "cli:jane <cli@chrono-ctx.local>"
 
 
 def test_sync_source_status_deactivates_missing_and_reactivates_present(db_handler, tmp_path):
