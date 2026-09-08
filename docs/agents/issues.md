@@ -815,4 +815,34 @@ touching the filesystem, and set `status` from `is_path_in_scope(event.dst)`. `s
 directory's inode onto child rows would corrupt identity. Full design in
 [dir-events-plan.md](dir-events-plan.md).
 
+## 23. MCP-triggered edits always commit to git as `unknown:filesystem` — OPEN
+
+**Files:** `src/app/mcp/server.py` (`write_file`/`create_file`/`delete_file`/`move_file`),
+`src/utils/formatter.py:normalize_event`, `src/vcs/services/versioning.py:_resolve_actor`
+
+The MCP write tools deliberately do plain filesystem I/O only — no direct call into
+`vcs.services.versioning` — because the watcher already tracks every filesystem change
+independently of who made it, and calling both would double-process the same edit (see the
+module docstring in `server.py`). The watcher is therefore the *only* path that ever commits
+to git, for MCP-driven writes exactly as for a human editor save.
+
+That leaves no way to attribute the resulting commit to the calling agent. `normalize_event`
+builds a `SourceEvent` straight from watchdog's `FileSystemEvent`, which carries no notion of
+who triggered it — `event.actor` is unset. `_resolve_actor` (spec 007,
+[007-actor-attribution.md](../specs/007-actor-attribution.md)) then falls back to the generic
+`"unknown:filesystem"` label. So every MCP write, from any agent session, lands in git
+attributed identically — indistinguishable from an unrelated human edit of the same file made
+moments apart.
+
+Confirmed still true after spec 008 ([008-mcp-read-version.md](../specs/008-mcp-read-version.md)),
+which wired `read_file`'s `version` field to real git history but explicitly left this out as a
+separate, harder problem.
+
+**Fix direction:** correlating an MCP call with the watcher event it causes needs a short-lived,
+path-keyed "pending actor" hint — set by the MCP tool immediately before its filesystem I/O,
+read and cleared by the watcher's event handler when the matching event fires, with a TTL so a
+later unrelated edit of the same path never inherits a stale binding. Debounce
+(`WatchWorker._should_process`, 0.5s default) and OS event-delivery latency both need to fit
+inside that TTL for the hint to still be there when the event lands.
+
 ---
