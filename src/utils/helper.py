@@ -46,6 +46,10 @@ def get_config_path():
     # when the Config*Event dataclasses build their default src.
     return anchored(os.getenv("CONFIG_PATH") or "config.yaml")
 
+def get_http_api_key():
+    load_dotenv(PROJECT_ROOT / ".env")
+    return os.getenv("HTTP_API_KEY") or None
+
 def save_to_file(data, file_path, mode="wb", encoding=DEFAULT_ENCODING):
     """Write `data` to `file_path`.
 

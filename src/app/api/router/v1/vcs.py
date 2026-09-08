@@ -1,10 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.api.deps import get_db_handler
+from app.api.deps import get_db_handler, require_api_key
 from vcs.db.sqlite import DBHandler
 from vcs.services import audit
 
-router = APIRouter(prefix="/v1")
+router = APIRouter(prefix="/v1", dependencies=[Depends(require_api_key)])
 
 
 @router.get("/sources")

@@ -42,9 +42,13 @@ def _source_dir(config_path, tmp_path):
 
 
 @pytest.fixture
-def client(db_handler):
+def client(db_handler, monkeypatch):
+    # spec 018: every /v1/* route now requires X-API-Key. These tests are
+    # about route behavior, not auth itself (that's tests/unit/app/api/test_auth.py) -
+    # authenticate once here so the rest of the file is unaffected.
+    monkeypatch.setenv("HTTP_API_KEY", "test-key")
     server.app.dependency_overrides[get_db_handler] = lambda: db_handler
-    yield TestClient(server.app)
+    yield TestClient(server.app, headers={"X-API-Key": "test-key"})
     server.app.dependency_overrides.clear()
 
 

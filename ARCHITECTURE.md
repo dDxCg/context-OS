@@ -394,8 +394,11 @@ Gaps not yet logged there:
 - **No process supervision** across the three entrypoints (§3) — running the
   full system today means starting the daemon, the MCP server, and the HTTP
   API by hand.
-- **No auth model** on the HTTP API or a per-caller scope — both assume a
-  single trusted, same-host caller.
+- **No per-caller scope on the HTTP API.** Spec
+  [018](docs/specs/018-http-api-key-auth.md) closed the bigger gap (no auth
+  at all — anyone reachable on the port got in); what's left is a single
+  shared `X-API-Key`, not distinct keys mapped to distinct allowed paths.
+  Noted as a deliberate deferral in that spec, not an oversight.
 - **No HTTP write endpoint for rollback.** `ctx rollback` (CLI-only, spec
   012) covers the interactive case; a remote/HTTP rollback trigger is still
   out of scope, same reasoning as
@@ -409,7 +412,11 @@ specs [011](docs/specs/011-cli-output-wiring.md) and
 [012](docs/specs/012-rollback-source.md). §6.1's per-repo lock is now a
 cross-process file lock (`filelock`), not `threading.Lock`. MCP-triggered
 edits used to always attribute to `unknown:filesystem` — closed by spec
-[013](docs/specs/013-actor-hints.md) (§6.2).
+[013](docs/specs/013-actor-hints.md) (§6.2). Tier 3 (wheel packaging,
+`TempFile.TMP_DIR` anchoring, SQLite WAL/timeout, SIGTERM handling — specs
+[014](docs/specs/014-wheel-packaging-utils.md)-[017](docs/specs/017-sigterm-handler.md))
+and the HTTP API's missing auth (spec
+[018](docs/specs/018-http-api-key-auth.md)) are both closed too.
 
 ## 9. Testing
 
