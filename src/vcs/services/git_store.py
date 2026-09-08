@@ -6,7 +6,7 @@ from pathlib import Path
 from filelock import FileLock
 
 # One lock per repo path, not one global lock - unrelated repos must not
-# block each other once multiple mirror repos exist (git-backend-plan.md's
+# block each other once multiple mirror repos exist (see docs/agents/STATE.md's
 # per-directory design). Guarded by _locks_guard so two threads racing to
 # create the *first* lock for a given path can't end up with two different
 # Lock objects for the same repo.

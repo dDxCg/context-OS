@@ -11,14 +11,14 @@ cross-referenced back here until the same 2026-09-09 re-audit). Moot: #17,
 #18 — described a storage model the same migration replaced outright.
 
 **#15-#20** were found while planning the config-control CLI and background
-daemon — see [cli-plan.md](cli-plan.md). They are a different class from
+daemon — see [STATE.md](STATE.md). They are a different class from
 everything above: rather than watcher or queue defects, they are gaps that
 only become reachable once the CLI is installed as a real binary and the
 runtime is stopped by a signal instead of Ctrl+C. #15, #17 and #18 each make
 part of the planned CLI impossible, not merely degraded.
 
 **#21-#22** are directory-tracking gaps — see
-[dir-events-plan.md](dir-events-plan.md). Both are live data-correctness bugs
+[STATE.md](STATE.md). Both are live data-correctness bugs
 today, and #21 is **platform-dependent**: it is silently broken on Windows
 and works incidentally on Linux, which is exactly the kind of split the unit
 suite cannot see because it mocks the watcher.
@@ -126,7 +126,7 @@ shared queue causes two distinct failures, not just the shutdown hang:
   sequentially) — acceptable given both are fast, file-local operations.
 - **MCP guardrail note:** the "update permission" step above is *not* what
   MCP access control ends up resting on. Resolved separately (full design
-  in [rabbitmq-migration.md](rabbitmq-migration.md)): MCP tool calls check
+  in [FUTURE.md](FUTURE.md)): MCP tool calls check
   the requested path against **current** state synchronously at call time
   and block if out of scope — a hard rule, independent of whether this
   queue has processed the relevant `Config*Event` yet. DB/status sync is
@@ -181,8 +181,8 @@ conflict with Option C above: the RabbitMQ *topology* (two queues,
 `source.#`/`config.#`, bound from one exchange) is a broker-side routing
 choice independent of how many local consumer threads read them — even a
 single future RabbitMQ consumer could bind both patterns onto one queue,
-mirroring C. See [rabbitmq-migration.md](rabbitmq-migration.md) for the
-full topology and interim-step design, now updated to describe Option C.
+mirroring C. See [FUTURE.md](FUTURE.md)
+for the full topology and interim-step design, now updated to describe Option C.
 
 ## 2. ~~`Config*Event()` construction always raises `TypeError`~~ — FIXED
 
@@ -608,7 +608,8 @@ is never closed (`DBHandler.close()` is called on no shutdown path at all).
 
 This is currently latent because the documented way to run the app is a foreground
 `python -m vcs.runtime` ended with Ctrl+C. It becomes a live defect the moment the runtime
-is backgrounded, which is exactly what [cli-plan.md](cli-plan.md) adds.
+is backgrounded, which is exactly what `ctx daemon` (spec 019, see
+[STATE.md](STATE.md)) adds.
 
 **Fix:** install `SIGTERM`/`SIGINT` handlers that call `VCSRuntime.stop()`, and make
 `stop()` idempotent — `LocalRuntime` already catches `KeyboardInterrupt` and calls its own
@@ -811,8 +812,10 @@ Two consequences worth stating plainly:
 whether the path was a directory — one statement deactivating the exact path *and*
 everything beneath it. For a real file the subtree clause matches nothing. Use `substr`
 rather than `LIKE`: `LIKE` treats `_` as a single-character wildcard and underscores are
-common in directory names, so `LIKE '/my_dir/%'` would also match `/myXdir/...`. Full
-design in [dir-events-plan.md](dir-events-plan.md).
+common in directory names, so `LIKE '/my_dir/%'` would also match `/myXdir/...`. (This
+SQL-prefix design was superseded before being built — see
+[STATE.md](STATE.md)
+for what actually fixed this.)
 
 **Re-audited 2026-09-09, confirmed fixed.** `dec14a3` implemented exactly the fix direction
 above: `deleted_handle` (`versioning.py:178-185`) now runs one `UPDATE ... WHERE location = ?
@@ -859,8 +862,10 @@ Two further latent problems in the same function:
 **Fix direction:** rewrite the path prefix for the whole subtree in one statement, before
 touching the filesystem, and set `status` from `is_path_in_scope(event.dst)`. `st_ino` /
 `st_dev` must **not** be rewritten — a rename does not change them, and writing the
-directory's inode onto child rows would corrupt identity. Full design in
-[dir-events-plan.md](dir-events-plan.md).
+directory's inode onto child rows would corrupt identity. (This SQL-prefix design was
+superseded before being built — see
+[STATE.md](STATE.md)
+for what actually fixed this.)
 
 **Re-audited 2026-09-09, confirmed fixed.** `dec14a3` implemented exactly this: `moved_handle`
 (`versioning.py:98-129`) rewrites the whole subtree via one `substr`-prefixed `UPDATE`

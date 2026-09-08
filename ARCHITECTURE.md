@@ -306,7 +306,7 @@ already carry one. A 5s TTL bounds how long a hint can outlive its write
 (covers the watcher's 0.5s debounce plus dispatch latency); an unconsumed
 or expired hint just falls back to `"unknown:filesystem"`, same as before
 spec 013. A raw filesystem edit with no MCP call at all — the case
-[competitive-landscape.md](docs/agents/competitive-landscape.md) flagged as
+[STATE.md](docs/agents/STATE.md) flagged as
 a strength to keep watching regardless — still has no identity to capture,
 which is correct: there's nothing to attribute. CLI actor capture stays out
 of scope: no CLI command currently writes content through the watcher path
@@ -330,7 +330,7 @@ watcher round-trip involved).
 `vcs/workers/bus.py`'s `LocalEventBus` is modeled after an AMQP topic
 exchange on purpose (`Subscription` = queue + binding key, `topic_matches`
 implements `#`/`*` wildcard matching) so that swapping in a real broker
-(RabbitMQ — see [rabbitmq-migration.md](docs/agents/rabbitmq-migration.md))
+(RabbitMQ — see [FUTURE.md](docs/agents/FUTURE.md))
 later is a broker substitution, not a rewrite. Delivery is asynchronous by
 design: `publish()` only enqueues, because running handlers inline on
 watchdog's dispatcher thread — which holds `BaseObserver._lock` — would
