@@ -2,8 +2,15 @@ from pathlib import Path
 from typing import Annotated
 import typer
 
+from utils.helper import get_db_url
+from vcs.db.sqlite import DBHandler
 from vcs.services.configure import add_sources, remove_sources, health_check
-from vcs.services.audit import get_sources, rollback_source, get_version_list, check_diff
+from vcs.services.audit import (
+    OutOfScopeError,
+    check_diff,
+    get_sources,
+    get_version_list,
+)
 
 cli = typer.Typer(name = "ctx")
 sources_cli = typer.Typer()
@@ -30,43 +37,81 @@ def health():
 @sources_cli.command("add")
 def sources_add(paths: list[Path] = PathArg):
     add_sources(paths)
+    for path in paths:
+        typer.echo(f"added: {path}")
 
 @sources_cli.command("remove")
 def sources_remove(paths: list[Path] = PathArg):
     remove_sources(paths)
+    for path in paths:
+        typer.echo(f"removed: {path}")
 
 @sources_cli.command("list")
 def sources():
-    get_sources()
+    db_handler = DBHandler.from_url(get_db_url())
+    try:
+        for source in get_sources(db_handler):
+            version = source["version"] or "-"
+            typer.echo(f"{source['location']}  [{source['provider']}]  status={source['status']}  version={version}")
+    finally:
+        db_handler.close()
 
 #Audit
 @cli.command("history")
 def get_version_history(path: Path = PathArg):
-    get_version_list(path)
+    try:
+        versions = get_version_list(str(path))
+    except OutOfScopeError:
+        typer.echo(f"{path}: out of scope", err=True)
+        raise typer.Exit(code=1)
+
+    if not versions:
+        typer.echo("no history")
+        return
+    for version in versions:
+        typer.echo(f"{version['rev']}  {version['timestamp']}  {version['author']}  {version['message']}")
 
 @cli.command("rollback")
 def rollback(
     path: Path = PathArg,
     version: Annotated[
-        int,
-        typer.Option("--version", "-v", help="Rollback version"),
-    ] = 1,
+        str,
+        typer.Option("--version", "-v", help="Git rev to roll back to"),
+    ] = None,
 ):
-    rollback_source(path, version)
+    typer.echo("rollback not implemented yet", err=True)
+    raise typer.Exit(code=1)
 
 @cli.command("diff")
 def show_diff(
     path: Path = PathArg,
-    from_version: Annotated[
-        int | None,
-        typer.Option("--from", help="Rollback version"),
+    from_rev: Annotated[
+        str | None,
+        typer.Option("--from", help="Git rev to diff from"),
     ] = None,
-    to_version: Annotated[
-        int | None,
-        typer.Option("--to", help="Rollback version"),
+    to_rev: Annotated[
+        str | None,
+        typer.Option("--to", help="Git rev to diff to"),
     ] = None,
 ):
-    check_diff(path, from_version, to_version)
+    if (from_rev is None) != (to_rev is None):
+        typer.echo("--from and --to must be given together", err=True)
+        raise typer.Exit(code=1)
+
+    try:
+        if from_rev is None:
+            versions = get_version_list(str(path))
+            if len(versions) < 2:
+                typer.echo("not enough history to diff (need at least 2 versions)", err=True)
+                raise typer.Exit(code=1)
+            to_rev = versions[0]["rev"]
+            from_rev = versions[1]["rev"]
+        text = check_diff(str(path), from_rev, to_rev)
+    except OutOfScopeError:
+        typer.echo(f"{path}: out of scope", err=True)
+        raise typer.Exit(code=1)
+
+    typer.echo(text or "no changes")
 
 
 if __name__ == "__main__":
