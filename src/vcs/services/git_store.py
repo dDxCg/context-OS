@@ -199,6 +199,34 @@ def commit_info(repo_path: Path, relpath: str) -> CommitInfo | None:
     return CommitInfo(rev=rev, author=author, timestamp=timestamp)
 
 
+def log_history(repo_path: Path, relpath: str) -> list[dict]:
+    """[{"rev", "author", "timestamp", "message"}, ...] for every commit
+    touching relpath, newest first. Empty list if relpath has no history
+    (including an unborn-HEAD repo, same non-zero-exit case as head_rev)."""
+    _require_initialized(repo_path)
+    result = subprocess.run(
+        ["git", "log", "--follow", "--format=%H|%an <%ae>|%aI|%s", "--", relpath],
+        cwd=str(repo_path), capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return []
+    commits = []
+    for line in result.stdout.strip().splitlines():
+        rev, author, timestamp, message = line.split("|", 3)
+        commits.append({"rev": rev, "author": author, "timestamp": timestamp, "message": message})
+    return commits
+
+
+def diff(repo_path: Path, relpath: str, rev1: str, rev2: str) -> str:
+    """Unified diff text of relpath between rev1 and rev2."""
+    _require_initialized(repo_path)
+    result = subprocess.run(
+        ["git", "diff", rev1, rev2, "--", relpath],
+        cwd=str(repo_path), check=True, capture_output=True, text=True,
+    )
+    return result.stdout
+
+
 def write_with_check(
     repo_path: Path, relpath: str, content: bytes, message: str, author: str,
     expected_rev: str | None = None, force: bool = False,

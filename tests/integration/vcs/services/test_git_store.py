@@ -345,3 +345,41 @@ def test_move_is_noop_when_source_missing(initialized_repo):
     )
 
     assert rev is None
+
+
+def test_ac2_log_history_returns_commits_newest_first(initialized_repo):
+    first_rev = git_store.write(
+        initialized_repo, "a.txt", b"v1",
+        message="add a.txt", author="Test Author <test@chrono-ctx.local>",
+    )
+    second_rev = git_store.write(
+        initialized_repo, "a.txt", b"v2",
+        message="update a.txt", author="Test Author <test@chrono-ctx.local>",
+    )
+
+    history = git_store.log_history(initialized_repo, "a.txt")
+
+    assert [entry["rev"] for entry in history] == [second_rev, first_rev]
+    assert history[0]["message"] == "update a.txt"
+    assert history[0]["author"] == "Test Author <test@chrono-ctx.local>"
+    assert history[1]["message"] == "add a.txt"
+
+
+def test_log_history_empty_for_untracked_path(initialized_repo):
+    assert git_store.log_history(initialized_repo, "never-written.txt") == []
+
+
+def test_ac3_diff_shows_unified_diff_between_two_revs(initialized_repo):
+    first_rev = git_store.write(
+        initialized_repo, "a.txt", b"line one\n",
+        message="add a.txt", author="Test Author <test@chrono-ctx.local>",
+    )
+    second_rev = git_store.write(
+        initialized_repo, "a.txt", b"line two\n",
+        message="update a.txt", author="Test Author <test@chrono-ctx.local>",
+    )
+
+    text = git_store.diff(initialized_repo, "a.txt", first_rev, second_rev)
+
+    assert "-line one" in text
+    assert "+line two" in text
