@@ -12,3 +12,4 @@ __pycache__
 requirements.in
 *.egg-info
 data/snapshots
+data/repo

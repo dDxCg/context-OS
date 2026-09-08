@@ -240,8 +240,16 @@ def test_derive_watch_targets_walks_up_to_nearest_existing_dir(config_path, tmp_
 
 def test_derive_watch_targets_skips_source_with_no_existing_ancestor(config_path):
     """Must not fall back to a filesystem root - that would put the whole disk
-    under the watcher."""
-    _write_config(config_path, [{"type": "local", "path": "Z:/nonexistent/a.txt"}])
+    under the watcher.
+
+    The path must be absolute on *both* platforms. A drive-letter path like
+    "Z:/..." is absolute on Windows but relative on POSIX, where it would
+    resolve under the repo and find an existing ancestor - so the assertion
+    below would pass locally and fail in CI.
+    """
+    _write_config(
+        config_path, [{"type": "local", "path": "/nonexistent-xyz-123/a.txt"}]
+    )
 
     assert configure.derive_watch_targets() == []
 

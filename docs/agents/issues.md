@@ -3,16 +3,22 @@
 Found during code review of the worker-abstraction refactor (`3630dc5`) plus the
 uncommitted fix-in-progress on top of it. Ranked most severe first.
 
-Open: **#15-#20**, all found while planning the config-control CLI and
-background daemon — see [cli-plan.md](cli-plan.md). Fixed: #1-#14, each with
-a regression test that's no longer `xfail` (except #9, found and fixed via
-live-testing rather than a unit test — see its entry).
+Open: **#15-#22**. Fixed: #1-#14, each with a regression test that's no
+longer `xfail` (except #9, found and fixed via live-testing rather than a
+unit test — see its entry).
 
-#15-#20 are a different class from everything above: rather than watcher or
-queue defects, they are gaps that only become reachable once the CLI is
-installed as a real binary and the runtime is stopped by a signal instead of
-Ctrl+C. #15, #17 and #18 each make part of the planned CLI impossible, not
-merely degraded.
+**#15-#20** were found while planning the config-control CLI and background
+daemon — see [cli-plan.md](cli-plan.md). They are a different class from
+everything above: rather than watcher or queue defects, they are gaps that
+only become reachable once the CLI is installed as a real binary and the
+runtime is stopped by a signal instead of Ctrl+C. #15, #17 and #18 each make
+part of the planned CLI impossible, not merely degraded.
+
+**#21-#22** are directory-tracking gaps — see
+[dir-events-plan.md](dir-events-plan.md). Both are live data-correctness bugs
+today, and #21 is **platform-dependent**: it is silently broken on Windows
+and works incidentally on Linux, which is exactly the kind of split the unit
+suite cannot see because it mocks the watcher.
 
 #12-#14 came out of decoupling watch targets from config sources, so that
 the MCP guardrail's file-granular grants stop creating one watcher per
@@ -724,5 +730,89 @@ even reads commit.
 **Fix:** enable WAL and pass a `timeout` in `from_url`; add `__enter__`/`__exit__` to
 `DBHandler` for short-lived CLI use — it already has `close`/`commit`/`rollback`/`begin`.
 That also fixes the runtime's connection never being closed (issue #16).
+
+## 21. Deleting a directory leaves every child row active — OPEN
+
+**File:** `src/vcs/services/versioning.py:93` (`deleted_handle`)
+
+```python
+query = Query(
+    query = "UPDATE locations SET status = 0 WHERE location = ?",
+    params = (event.src,)
+)
+```
+
+`locations` only ever holds **file** rows — directories are never inserted. So an exact
+path match against a directory updates nothing, and every file underneath keeps
+`status = 1`. **The database claims files exist that are gone**, and stays wrong until the
+next restart, when `sync_source_status` reconciles by stat.
+
+**This is platform-dependent, and worse on Windows.** From the vendored watchdog sources:
+
+| | Windows (`read_directory_changes.py`) | Linux (`inotify.py`) |
+|---|---|---|
+| dir delete | one `FileDeletedEvent` carrying the *directory* path, `is_dir=False`, **no child events** | `DirDeletedEvent` + a `FileDeletedEvent` per child |
+
+Windows [line 96-97](../.venv/Lib/site-packages/watchdog/observers/read_directory_changes.py)
+emits `FileDeletedEvent` unconditionally — it *cannot* check `isdir`, because the path is
+already gone by the time the event is produced. Linux therefore repairs itself incidentally
+via per-child events; Windows loses the entire subtree.
+
+Two consequences worth stating plainly:
+
+- **`is_dir` cannot be trusted for deletes.** It is `False` for a deleted directory on
+  Windows. A fix that branches on `is_dir` would repair Linux and leave Windows broken.
+  (`is_dir` is set by `formatter.normalize_event` but read *nowhere* in the consumer or
+  versioning path today — confirmed by grep across `src/`.)
+- No unit test can catch this. The suite mocks the watcher, so the platform split is
+  invisible to it.
+
+**Fix direction:** make the delete subtree-aware unconditionally, so it never has to ask
+whether the path was a directory — one statement deactivating the exact path *and*
+everything beneath it. For a real file the subtree clause matches nothing. Use `substr`
+rather than `LIKE`: `LIKE` treats `_` as a single-character wildcard and underscores are
+common in directory names, so `LIKE '/my_dir/%'` would also match `/myXdir/...`. Full
+design in [dir-events-plan.md](dir-events-plan.md).
+
+## 22. Moving/renaming a directory is a silent no-op — OPEN
+
+**File:** `src/vcs/services/versioning.py:75` (`moved_handle`)
+
+```python
+context_id = _get_context_id_by_location(db_handler, event.dst)
+update_path = Query(
+    query="UPDATE locations SET location = ?, st_ino = ?, st_dev = ? WHERE context_id = ?",
+    params=(event.dst, st_ino, st_dev, context_id),
+)
+```
+
+`_get_context_id_by_location` stats `event.dst` and looks the row up by
+`(st_ino, st_dev)`. For a directory that is the *directory's* inode, which has no row, so
+`context_id` is `None` — and `WHERE context_id = NULL` matches nothing in SQL. The update
+runs and changes zero rows, with no error.
+
+Child rows keep pointing at paths under the **old** directory name. Every subsequent event
+for those files then fails to match on path, so the tree effectively falls out of tracking.
+
+**Currently masked, but not fixed.** On recursive watches both platforms also emit
+synthetic per-child `FileMovedEvent`s via `generate_sub_moved_events`, and those *do* drive
+`moved_handle` correctly per file — the child's inode is unchanged by a rename, so the
+lookup succeeds. So directory moves appear to work today by accident. That masking is
+fragile: it requires `recursive=True`, costs O(n) syscalls, and races an `os.walk` of the
+destination that watchdog performs to synthesise the events.
+
+Two further latent problems in the same function:
+
+- `get_path_stats(event.dst)` is called **before** any DB work, so if `dst` has already
+  been moved or deleted again it raises `FileNotFoundError` and the whole handler is lost.
+  (Since the worker-durability fix it is logged and skipped rather than killing the thread.)
+- Nothing reconciles `status` on a move. A directory renamed *out of* every configured
+  source keeps `status = 1` until the next restart.
+
+**Fix direction:** rewrite the path prefix for the whole subtree in one statement, before
+touching the filesystem, and set `status` from `is_path_in_scope(event.dst)`. `st_ino` /
+`st_dev` must **not** be rewritten — a rename does not change them, and writing the
+directory's inode onto child rows would corrupt identity. Full design in
+[dir-events-plan.md](dir-events-plan.md).
 
 ---

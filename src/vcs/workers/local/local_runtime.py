@@ -3,42 +3,51 @@ from pathlib import Path
 from utils.helper import get_config_path
 from vcs.services.configure import derive_watch_targets, is_path_in_scope, parse_config
 from vcs.shared.types import CONFIG_EVENTS
-from vcs.workers.local.local_queue import LocalQueue
+from vcs.workers.bus import LocalEventBus
 from vcs.workers.local.local_watcher import WatchWorker
 from vcs.workers.consumer_worker import ConsumerWorker
 from vcs.workers.config.config_consumer import ConfigConsumerWorker
-from vcs.workers.utils import STOP
+
+SOURCE_BINDING = "source.#"
+CONFIG_BINDING = "config.#"
+
 
 class LocalRuntime:
-    def __init__(self, sources, stop_event, watcher=None, queue=None, config_queue=None):
+    def __init__(self, sources, stop_event, watcher=None, bus=None):
         self.stop_event = stop_event
         self._scope_cache = None
 
-        if watcher:
-            self.watcher = watcher
-        else:
-            self.watcher = WatchWorker(self.stop_event)
+        self.watcher = watcher if watcher else WatchWorker(self.stop_event)
+        self.bus = bus if bus else LocalEventBus()
+
+        # Bindings, not hand-written routing. The scope predicate belongs to the
+        # source subscription, so config events are exempt by construction
+        # rather than by an early return in a router.
+        self.source_sub = self.bus.subscribe(SOURCE_BINDING, where=self._in_scope)
+        self.config_sub = self.bus.subscribe(CONFIG_BINDING)
 
         self.consumer_worker = ConsumerWorker(
             self.stop_event,
-            queue=queue
+            queue=self.source_sub.queue
         )
-
-        if queue:
-            self.queue = queue
-        else:
-            self.queue = self.consumer_worker.queue
-
-        self.config_queue = config_queue if config_queue else LocalQueue()
 
         self.config_consumer_worker = ConfigConsumerWorker(
             self.stop_event,
             watcher=self.watcher,
-            publish=self._route,
-            queue=self.config_queue
+            publish=self._publish,
+            queue=self.config_sub.queue
         )
 
         self._init_worker(sources)
+
+    @property
+    def queue(self):
+        """Mailbox the source consumer reads. Kept as a name for readability."""
+        return self.source_sub.queue
+
+    @property
+    def config_queue(self):
+        return self.config_sub.queue
 
     def _scope_config(self):
         """Parsed config, memoized.
@@ -47,50 +56,44 @@ class LocalRuntime:
         which is fine per MCP tool call but not per filesystem event.
 
         No lock: watchdog's BaseObserver.dispatch_events runs every handler on
-        a single dispatcher thread, so _route and _route_config_only are
-        serialized against each other. If that ever stops holding, this cache
-        needs one.
+        a single dispatcher thread, so every _publish - and therefore every
+        evaluation of the scope predicate during fanout - is serialized. This
+        is why the predicate is evaluated at fanout rather than in the consumer
+        thread; moving it there would make this cache genuinely cross-thread
+        and require a lock.
         """
         if self._scope_cache is None:
             self._scope_cache = parse_config()
         return self._scope_cache
 
-    def _route(self, event):
-        """Demux watcher events onto the queue owned by the worker that handles them."""
+    def _publish(self, event):
+        """Publish onto the bus.
+
+        The only logic here is cache coherence, not routing: a config change
+        must invalidate the scope cache immediately, on this thread, so the
+        very next source event is matched against the new scope instead of
+        waiting for the config worker to drain its queue.
+        """
         if isinstance(event, CONFIG_EVENTS):
-            self.config_queue.publish(event)
-            return
-
-        # Watch targets are directories derived from file-granular sources, so
-        # a watch is deliberately broader than the granted scope. This filter
-        # is what keeps unapproved siblings from being versioned - without it,
-        # watching /a because /a/x.txt was approved would also track /a/secret.
-        if not self._in_scope(event):
-            return
-
-        self.queue.publish(event)
+            self._scope_cache = None
+        self.bus.publish(event)
 
     def _in_scope(self, event):
+        """Predicate for the source subscription.
+
+        Watch targets are directories derived from file-granular sources, so a
+        watch is deliberately broader than the granted scope. This is what
+        keeps unapproved siblings from being versioned - without it, watching
+        /a because /a/x.txt was approved would also track /a/secret. It is also
+        what keeps unrelated files in the config file's parent directory out,
+        now that the config watch publishes through the same bus.
+        """
         config = self._scope_config()
         if is_path_in_scope(event.src, config=config):
             return True
         # A move out of scope still has to be recorded as a departure.
         dst = getattr(event, "dst", None)
         return dst is not None and is_path_in_scope(dst, config=config)
-
-    def _route_config_only(self, event):
-        """Router for the config-file watch.
-
-        That watch covers the config file's whole parent directory, so it also
-        sees unrelated siblings. Drop everything that is not a config event -
-        those files are only in scope if a source watch covers them.
-        """
-        if isinstance(event, CONFIG_EVENTS):
-            # Invalidate here rather than in ConfigConsumer so the new scope
-            # applies to the very next event, without waiting for the config
-            # worker to drain its queue.
-            self._scope_cache = None
-            self.config_queue.publish(event)
 
     def _init_worker(self, sources):
         # Derived rather than one watch per source, so startup and hot-add
@@ -99,7 +102,7 @@ class LocalRuntime:
         # watchers against the real config behind a caller's back.
         self.watcher.reconcile(
             derive_watch_targets({"sources": sources}),
-            callback=self._route,
+            callback=self._publish,
             tag="source"
         )
 
@@ -108,7 +111,7 @@ class LocalRuntime:
         # parent is usually the repo root.
         self.watcher.add_watch(
             str(Path(get_config_path()).parent),
-            callback=self._route_config_only,
+            callback=self._publish,
             recursive=False,
             tag="config",
             debounce=False
@@ -129,7 +132,9 @@ class LocalRuntime:
     def stop(self):
         self.stop_event.set()
         self.watcher.stop()
-        self.queue.publish(STOP)
-        self.config_queue.publish(STOP)
+        # One call, however many subscribers exist. Hand-writing a STOP per
+        # queue is what let the consumer set drift out of sync with shutdown
+        # (issues.md #1).
+        self.bus.close()
         self.consumer_worker.join()
         self.config_consumer_worker.join()

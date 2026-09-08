@@ -84,7 +84,7 @@ sources:
 ## Chạy
 
 ```bash
-python -m vcs.runtime      # khởi tạo schema/config, bắt đầu watch + versioning
+uv run python -m vcs.runtime      # khởi tạo schema/config, bắt đầu watch + versioning
 ctx source add <path>      # thêm nguồn vào config.yaml
 ctx source remove <path>   # xoá nguồn khỏi config.yaml
 ```

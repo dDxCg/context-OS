@@ -1,0 +1,272 @@
+import subprocess
+import threading
+
+import pytest
+
+from vcs.services import git_store
+
+
+def test_ac1_init_repo_creates_valid_git_repo(repo_path):
+    git_store.init_repo(repo_path)
+
+    assert (repo_path / ".git").is_dir()
+    result = subprocess.run(
+        ["git", "-C", str(repo_path), "status"],
+        capture_output=True,
+    )
+    assert result.returncode == 0
+
+
+def test_ac2_write_creates_first_commit_with_message_and_author(initialized_repo):
+    rev = git_store.write(
+        initialized_repo,
+        "a.txt",
+        b"hello",
+        message="add a.txt",
+        author="Test Author <test@chrono-ctx.local>",
+    )
+
+    assert (initialized_repo / "a.txt").read_bytes() == b"hello"
+
+    log = subprocess.run(
+        ["git", "-C", str(initialized_repo), "log", "--format=%H|%s|%an <%ae>"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    lines = log.stdout.strip().splitlines()
+    assert len(lines) == 1
+    commit_hash, message, author = lines[0].split("|", 2)
+    assert message == "add a.txt"
+    assert author == "Test Author <test@chrono-ctx.local>"
+    assert rev == commit_hash
+
+
+def test_ac3_write_identical_content_is_noop(initialized_repo):
+    first_rev = git_store.write(
+        initialized_repo, "a.txt", b"hello",
+        message="add a.txt", author="Test Author <test@chrono-ctx.local>",
+    )
+
+    second_rev = git_store.write(
+        initialized_repo, "a.txt", b"hello",
+        message="rewrite a.txt", author="Test Author <test@chrono-ctx.local>",
+    )
+
+    assert second_rev == first_rev
+    log = subprocess.run(
+        ["git", "-C", str(initialized_repo), "log", "--format=%H"],
+        capture_output=True, text=True, check=True,
+    )
+    assert len(log.stdout.strip().splitlines()) == 1
+
+
+def test_ac4_write_different_content_creates_new_commit(initialized_repo):
+    first_rev = git_store.write(
+        initialized_repo, "a.txt", b"hello",
+        message="add a.txt", author="Test Author <test@chrono-ctx.local>",
+    )
+
+    second_rev = git_store.write(
+        initialized_repo, "a.txt", b"world",
+        message="update a.txt", author="Test Author <test@chrono-ctx.local>",
+    )
+
+    assert second_rev != first_rev
+    log = subprocess.run(
+        ["git", "-C", str(initialized_repo), "log", "--format=%H"],
+        capture_output=True, text=True, check=True,
+    )
+    assert len(log.stdout.strip().splitlines()) == 2
+
+
+def test_ac5_head_rev_returns_last_commit_touching_path_not_overall_head(initialized_repo):
+    a_rev = git_store.write(
+        initialized_repo, "a.txt", b"hello",
+        message="add a.txt", author="Test Author <test@chrono-ctx.local>",
+    )
+    b_rev = git_store.write(
+        initialized_repo, "b.txt", b"world",
+        message="add b.txt", author="Test Author <test@chrono-ctx.local>",
+    )
+
+    assert a_rev != b_rev
+    assert git_store.head_rev(initialized_repo, "a.txt") == a_rev
+    assert git_store.head_rev(initialized_repo, "b.txt") == b_rev
+
+
+def test_ec2_head_rev_returns_none_for_untracked_path(initialized_repo):
+    git_store.write(
+        initialized_repo, "a.txt", b"hello",
+        message="add a.txt", author="Test Author <test@chrono-ctx.local>",
+    )
+
+    assert git_store.head_rev(initialized_repo, "never-written.txt") is None
+
+
+def test_ec1_write_on_uninitialized_repo_raises_repo_not_initialized(repo_path):
+    with pytest.raises(git_store.RepoNotInitializedError):
+        git_store.write(
+            repo_path, "a.txt", b"hello",
+            message="add a.txt", author="Test Author <test@chrono-ctx.local>",
+        )
+
+    with pytest.raises(git_store.RepoNotInitializedError):
+        git_store.head_rev(repo_path, "a.txt")
+
+
+def test_ec3_init_repo_raises_when_git_missing(repo_path, monkeypatch):
+    def fake_run(*args, **kwargs):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(git_store.subprocess, "run", fake_run)
+
+    with pytest.raises(git_store.GitNotAvailableError):
+        git_store.init_repo(repo_path)
+
+
+def test_ac6_concurrent_write_no_index_lock_error(initialized_repo):
+    errors = []
+
+    def do_write(name, content):
+        try:
+            git_store.write(
+                initialized_repo, name, content,
+                message=f"add {name}", author="Test Author <test@chrono-ctx.local>",
+            )
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=do_write, args=("a.txt", b"hello")),
+        threading.Thread(target=do_write, args=("b.txt", b"world")),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+        assert not t.is_alive()
+
+    assert not errors, errors
+    log = subprocess.run(
+        ["git", "-C", str(initialized_repo), "log", "--format=%H"],
+        capture_output=True, text=True, check=True,
+    )
+    assert len(log.stdout.strip().splitlines()) == 2
+
+
+def test_ac1_expected_rev_none_writes_unconditionally(initialized_repo):
+    first_rev = git_store.write(
+        initialized_repo, "a.txt", b"hello",
+        message="add a.txt", author="Test Author <test@chrono-ctx.local>",
+    )
+
+    second_rev = git_store.write_with_check(
+        initialized_repo, "a.txt", b"world",
+        message="update a.txt", author="Test Author <test@chrono-ctx.local>",
+        expected_rev=None,
+    )
+
+    assert second_rev != first_rev
+    assert git_store.head_rev(initialized_repo, "a.txt") == second_rev
+
+
+def test_ac2_matching_expected_rev_commits(initialized_repo):
+    r1 = git_store.write(
+        initialized_repo, "a.txt", b"hello",
+        message="add a.txt", author="Test Author <test@chrono-ctx.local>",
+    )
+
+    r2 = git_store.write_with_check(
+        initialized_repo, "a.txt", b"world",
+        message="update a.txt", author="Test Author <test@chrono-ctx.local>",
+        expected_rev=r1,
+    )
+
+    assert r2 != r1
+    assert git_store.head_rev(initialized_repo, "a.txt") == r2
+
+
+def test_ac3_stale_expected_rev_raises_and_no_commit(initialized_repo):
+    r1 = git_store.write(
+        initialized_repo, "a.txt", b"hello",
+        message="add a.txt", author="Test Author <test@chrono-ctx.local>",
+    )
+    # Someone else commits in between - r1 is now stale.
+    git_store.write(
+        initialized_repo, "a.txt", b"from someone else",
+        message="someone else's edit", author="Someone Else <else@chrono-ctx.local>",
+    )
+    r_current = git_store.head_rev(initialized_repo, "a.txt")
+
+    with pytest.raises(git_store.ConcurrentEditError):
+        git_store.write_with_check(
+            initialized_repo, "a.txt", b"my stale edit",
+            message="my edit", author="Test Author <test@chrono-ctx.local>",
+            expected_rev=r1,
+        )
+
+    assert git_store.head_rev(initialized_repo, "a.txt") == r_current
+
+
+def test_ac4_force_overrides_stale_expected_rev(initialized_repo):
+    r1 = git_store.write(
+        initialized_repo, "a.txt", b"hello",
+        message="add a.txt", author="Test Author <test@chrono-ctx.local>",
+    )
+    git_store.write(
+        initialized_repo, "a.txt", b"from someone else",
+        message="someone else's edit", author="Someone Else <else@chrono-ctx.local>",
+    )
+
+    r_forced = git_store.write_with_check(
+        initialized_repo, "a.txt", b"my forced edit",
+        message="force overwrite", author="Test Author <test@chrono-ctx.local>",
+        expected_rev=r1, force=True,
+    )
+
+    assert git_store.head_rev(initialized_repo, "a.txt") == r_forced
+    assert (initialized_repo / "a.txt").read_bytes() == b"my forced edit"
+
+
+def test_ac5_concurrent_edit_error_exposes_conflict_details(initialized_repo):
+    r1 = git_store.write(
+        initialized_repo, "a.txt", b"hello",
+        message="add a.txt", author="Test Author <test@chrono-ctx.local>",
+    )
+    r_current = git_store.write(
+        initialized_repo, "a.txt", b"from someone else",
+        message="someone else's edit", author="Someone Else <else@chrono-ctx.local>",
+    )
+
+    with pytest.raises(git_store.ConcurrentEditError) as excinfo:
+        git_store.write_with_check(
+            initialized_repo, "a.txt", b"my stale edit",
+            message="my edit", author="Test Author <test@chrono-ctx.local>",
+            expected_rev=r1,
+        )
+
+    err = excinfo.value
+    assert err.path == "a.txt"
+    assert err.expected_rev == r1
+    assert err.current_rev == r_current
+    assert err.current_author == "Someone Else <else@chrono-ctx.local>"
+    assert err.current_timestamp  # non-empty, ISO 8601 from git %aI
+
+
+def test_ec1_commit_info_returns_none_for_untracked_path(initialized_repo):
+    git_store.write(
+        initialized_repo, "a.txt", b"hello",
+        message="add a.txt", author="Test Author <test@chrono-ctx.local>",
+    )
+
+    assert git_store.commit_info(initialized_repo, "never-written.txt") is None
+
+
+def test_ec2_write_with_check_on_uninitialized_repo_raises(repo_path):
+    with pytest.raises(git_store.RepoNotInitializedError):
+        git_store.write_with_check(
+            repo_path, "a.txt", b"hello",
+            message="add a.txt", author="Test Author <test@chrono-ctx.local>",
+            expected_rev="deadbeef",
+        )

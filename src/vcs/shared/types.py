@@ -100,3 +100,81 @@ CONFIG_EVENTS = (
     ConfigDeletedEvent,
 )
 
+# --- Pub/sub routing -------------------------------------------------------
+#
+# Routing keys are coarse: the category, not the verb. The verb stays an
+# isinstance concern inside each consumer.
+#
+# Subscribers bind with "source.#" / "config.#" rather than an exact match. In
+# AMQP topic exchanges "#" matches *zero or more* words, so those patterns match
+# the bare keys below as well as a future "source.created" - publishing can be
+# refined later without touching any binding.
+SOURCE_TOPIC = "source"
+CONFIG_TOPIC = "config"
+
+
+def topic_for(event) -> str:
+    """Routing key for `event`."""
+    return CONFIG_TOPIC if isinstance(event, CONFIG_EVENTS) else SOURCE_TOPIC
+
+
+# Wire name -> class. Not used locally (events are passed by reference), but it
+# is the contract a real broker will inherit, so it is defined and tested now.
+# The names are finer than the routing keys on purpose: they already carry the
+# verb, so refining routing later needs no new vocabulary.
+_EVENT_NAMES = {
+    "source.created": CreatedEvent,
+    "source.modified": ModifiedEvent,
+    "source.deleted": DeletedEvent,
+    "source.moved": MovedEvent,
+    "config.created": ConfigCreatedEvent,
+    "config.modified": ConfigModifiedEvent,
+    "config.deleted": ConfigDeletedEvent,
+    "config.moved": ConfigMovedEvent,
+}
+_EVENT_CLASS_NAMES = {cls: name for name, cls in _EVENT_NAMES.items()}
+
+
+def event_name(event) -> str:
+    """Stable wire name for `event`, e.g. "source.modified"."""
+    try:
+        return _EVENT_CLASS_NAMES[type(event)]
+    except KeyError:
+        raise ValueError(f"unregistered event type: {type(event).__name__}") from None
+
+
+def event_to_dict(event) -> dict:
+    """Serialize `event` to a broker-friendly dict."""
+    data = {
+        "event": event_name(event),
+        "src": event.src,
+        "provider": event.provider,
+        "is_dir": event.is_dir,
+    }
+    dst = getattr(event, "dst", None)
+    if dst is not None:
+        data["dst"] = dst
+    return data
+
+
+def event_from_dict(data: dict):
+    """Rebuild an event from `event_to_dict` output.
+
+    `src` is always passed explicitly. The Config*Event classes default it via
+    a factory reading the *current* config path, so relying on that default
+    would silently rewrite src on a round-trip.
+    """
+    name = data.get("event")
+    cls = _EVENT_NAMES.get(name)
+    if cls is None:
+        raise ValueError(f"unknown event name: {name!r}")
+
+    kwargs = {
+        "src": data["src"],
+        "provider": data.get("provider", "local"),
+        "is_dir": data.get("is_dir", False),
+    }
+    if issubclass(cls, MovedEvent):
+        kwargs["dst"] = data["dst"]
+    return cls(**kwargs)
+
