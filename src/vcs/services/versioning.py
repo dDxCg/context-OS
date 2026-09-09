@@ -86,10 +86,15 @@ def modified_handle(db_handler: DBHandler, event: ModifiedEvent, tmp_file: TempF
 
 
 def _should_commit(repo_path: Path, relpath: str, upcoming_bytes: bytes) -> bool:
-    current_path = repo_path / relpath
-    if not current_path.exists():
+    """Mirror repos are bare (spec 025) - no working-tree file to compare
+    against, so the current content comes from the object store (HEAD)
+    instead. Callers only reach here once head_rev() has already confirmed
+    relpath exists at HEAD (see modified_handle), but the existence check
+    is kept anyway as the same graceful fallback the old working-tree
+    version had for a path with no current content to compare against."""
+    if not git_store.path_exists_at_rev(repo_path, relpath, "HEAD"):
         return True
-    current_bytes = current_path.read_bytes()
+    current_bytes = git_store.show(repo_path, relpath, "HEAD")
     similarity = text_similarity(bytes_to_string(current_bytes), bytes_to_string(upcoming_bytes))
     return similarity < NEW_VERSION_THRESHOLD
 

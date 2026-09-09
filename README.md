@@ -116,3 +116,4 @@ uv run ruff check .
 | Doc | Content |
 | --- | --- |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Detailed architecture: container/sequence diagrams, data model, concurrency, actor attribution, design decisions, open gaps |
+| [`docs/runbook-shared-install.md`](docs/runbook-shared-install.md) | Helpdesk-run setup for a shared machine — non-technical users install nothing, technical team owns audit |

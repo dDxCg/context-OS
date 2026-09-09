@@ -49,7 +49,19 @@ def _spawn() -> int:
     log_file = open(LOG_PATH, "ab")
     kwargs = {}
     if sys.platform == "win32":
-        kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        # No DETACHED_PROCESS/CREATE_NO_WINDOW (issue #27): either one means
+        # the child gets no real console at all, and GenerateConsoleCtrlEvent
+        # (what os.kill(pid, CTRL_BREAK_EVENT) calls) cannot then target it
+        # from a later, unrelated process - confirmed by experiment, this is
+        # exactly why every `ctx daemon stop` failed with WinError 87.
+        # CREATE_NEW_PROCESS_GROUP alone gives it a real console (so
+        # CTRL_BREAK_EVENT delivery works cross-process); STARTUPINFO/SW_HIDE
+        # hides that console's window instead of never creating one.
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = subprocess.SW_HIDE
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        kwargs["startupinfo"] = startupinfo
     else:
         kwargs["start_new_session"] = True
     proc = subprocess.Popen(

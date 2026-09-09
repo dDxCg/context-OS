@@ -62,8 +62,12 @@ actual operational concern (not yet observed).
 The only reconciliation against a missed OS filesystem event is `sync_source_status` at
 process restart. No periodic or on-read reconcile exists, so a dropped event (rare, but
 possible — `cachebro` sidesteps this by hash-verifying on every read instead of trusting
-the watcher) leaves `locations` wrong until the next restart. Not yet a live-observed
-problem; worth building only if it becomes one.
+the watcher) leaves `locations` wrong until the next restart. **Now live-observed, not
+hypothetical**: [issues.md](issues.md) #26 (`ctx daemon` disappeared mid-run, cause
+undetermined) — a restart afterward did not remove mirror entries for files deleted from
+the source during the downtime window; `sync_source_status` didn't catch it. Worth building
+once #26's root cause (or a general "daemon can go down unexpectedly") is treated as a real
+operating condition rather than a rare edge case.
 
 ## 6. RabbitMQ central-writer distribution — deferred pending a real driver
 
@@ -115,7 +119,50 @@ actually insufficient. Git federation (offline-first) and metadata-only central 
 both real alternative directions, deliberately not chosen over this one without that
 driver either.
 
-## 7. Already tracked elsewhere — not duplicated here
+## 7. Simple install & integration plan (tech / non-tech / agent)
+
+Draft: [draft/install-integration-plan.md](draft/install-integration-plan.md).
+Scopes the most basic real scenario — Claude Code as the MCP client, a
+shared/cowork folder as the source — across the three audiences this project
+already targets. Ground rule: non-technical users install nothing and never
+touch audit (that stays with the technical team via `ctx history`/`ctx
+diff`/`ctx rollback*`); the versioning engine already captures their edits
+honestly (`unknown:filesystem`) with zero new code. What's actually missing,
+in order: (1) an autostart-on-boot runbook + OS templates so a helpdesk-run
+daemon survives a reboot unattended, (2) a `.mcp.json` for Claude Code — this
+repo has `fastmcp.json` (FastMCP's own run-config) but that is not what
+Claude Code reads to register a project MCP server, (3) confirmation that
+Claude Code's MCP client actually renders the guardrail's elicitation
+prompts (fail-closed if not, so unverified means "unusable from Claude Code,"
+not "unsafe"). "Cowork" is scoped deliberately narrow — multiple actors on
+one shared folder/daemon, not multi-machine distribution (that stays item 6).
+A self-serve installer for non-tech users (item 4 of the draft) is explicitly
+deferred until helpdesk-managed install proves insufficient.
+
+## 8. Audit & tracing log (local, then centralized)
+
+Draft: [draft/audit-tracing-log-plan.md](draft/audit-tracing-log-plan.md).
+Goal, confirmed with the user: fast incident-response tracing — what
+happened to a path, when, who (human or agent) — not general-purpose
+bookkeeping. Confirmed by grep, not assumed: zero logging exists in
+`src/app/` (MCP server, CLI, HTTP API) or `audit.py`/`actor_hints.py` — a
+denied scope request or a declined elicitation leaves no trace anywhere,
+git history only covers successful writes. No new gate for humans editing
+directly — the plan joins `audit_events` (agent gate decisions) with
+existing git history (all content changes, human or agent) into one
+timeline instead. Phase 1 (buildable now): dual-write every event to a
+queryable `audit_events` table and an ECS-aligned `data/audit.jsonl`
+("log chuẩn hướng đến ELK" from day one, not a later conversion), a
+`trace_id` threaded through the existing `pending_actor_hints`
+cross-process handoff (spec 013), and the actual deliverable — a joined
+`ctx incident <path>` timeline (audit events + git log merged), not just
+raw event browsing. Phase 2 (centralized, sketched only): point
+Filebeat/Logstash at `audit.jsonl` once a real ELK stack exists — different
+question from item 6 (content-write distribution), driver already implied
+by item 7's "audit stays with the technical team" once that's more than one
+machine.
+
+## 9. Already tracked elsewhere — not duplicated here
 
 See `ARCHITECTURE.md` §8 for: HTTP API per-caller scope (today: one shared `X-API-Key`),
 no HTTP write endpoint for rollback (deliberate, matches the read-only API scoping), and

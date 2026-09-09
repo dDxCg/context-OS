@@ -5,6 +5,8 @@ data/blobs/*
 .env.*
 .env
 db-dev.sqlite
+db-dev.sqlite-wal
+db-dev.sqlite-shm
 __pycache__
 .pytest_cache
 .ruff_cache

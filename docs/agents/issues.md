@@ -3,13 +3,18 @@
 Found during code review of the worker-abstraction refactor (`3630dc5`) plus the
 uncommitted fix-in-progress on top of it. Ranked most severe first.
 
-All logged issues are closed. Fixed: #1-#14 (each with a regression test
-that's no longer `xfail`, except #9 — found and fixed via live-testing),
-#15/#19/#20/#16 (specs 014-017, Tier 3), #21/#22 (fixed by the git-backend
-migration, `dec14a3`, but not cross-referenced back here until a
-2026-09-09 re-audit), and #24 (test-hermeticity gaps found via a failing
-CI run, 2026-09-09). Moot: #17, #18 — described a storage model the git
-migration replaced outright.
+Fixed: #1-#14 (each with a regression test that's no longer `xfail`, except
+#9 — found and fixed via live-testing), #15/#19/#20/#16 (specs 014-017,
+Tier 3), #21/#22 (fixed by the git-backend migration, `dec14a3`, but not
+cross-referenced back here until a 2026-09-09 re-audit), #24
+(test-hermeticity gaps found via a failing CI run, 2026-09-09), and
+#25/#27/#28 (specs 022/023/024, all found live via
+[scripts/live_integration_test.py](../../scripts/live_integration_test.py)
+2026-09-09, all re-verified live after fixing). Moot: #17, #18 — described a
+storage model the git migration replaced outright. **Open: #26** (`ctx
+daemon` disappeared with no log trace, found live 2026-09-09) — #27's fix
+(same day) is plausibly its root cause but this was not independently
+re-confirmed, stays open pending a fresh live observation.
 
 **#15-#20** were found while planning the config-control CLI and background
 daemon — see [STATE.md](STATE.md). They are a different class from
@@ -951,3 +956,193 @@ the same technique used to verify the earlier CI path-bug fix, since this machin
 CI-identical environment to test against directly.
 
 ---
+
+## 25. ~~`init_repo()` has no cross-process lock — racy `git init`/`git config` on a live daemon~~ — FIXED
+
+**File:** `src/vcs/services/git_store.py` (`init_repo`)
+
+Found live (2026-09-09) running the first real end-to-end pass: a real `ctx daemon`
+against `knowledge.example/`, an MCP write via an in-process `fastmcp.Client` (standing in
+for a real Claude Code session — see
+[live-integration-test-plan.md](draft/live-integration-test-plan.md)), reproduced on the
+first and second run alike, not a one-off flake:
+
+```
+subprocess.CalledProcessError: Command '['git', 'init']' returned non-zero exit status 128
+```
+
+raised from `current_version()` (called by the MCP `read_file` tool) immediately after
+`create_file` wrote a new file straight to disk. Sequence: `create_file` writes the file,
+the daemon's watcher picks up the filesystem event and starts committing it through
+`versioning.py`'s handler (which calls `init_repo()` on the same mirror repo) at
+essentially the same moment the MCP client's follow-up `read_file` also calls
+`current_version()` → `init_repo()` on that repo. `write()` (`git_store.py:99`) is guarded
+by the per-repo `_lock_for()` `FileLock` (spec 012); `init_repo()` is not — every one of its
+6 call sites (`versioning.py:57,72,134,158,188,201`, plus 4 in `audit.py`) calls it
+unlocked, including the two processes that just raced here. Re-running `git init` manually
+in isolation right after (`git init` on an already-`.git` directory is normally a safe,
+idempotent no-op — `Reinitialized existing Git repository...`, exit 0) succeeded every
+time; it only fails when a second process's `git init`/`git config` subprocess calls
+interleave with it against the same `.git` directory, which is exactly what two real OS
+processes both reacting to the same fresh file do.
+
+**Fixed:** spec [022](../specs/022-init-repo-cross-process-lock.md) — `init_repo()`'s body
+now runs inside `with _lock_for(repo_path):`, the same cross-process `FileLock` `write()`/
+`remove()`/`move()` already use. Regression test
+(`test_ac1_init_repo_blocks_while_repo_lock_held`) proves the serialization directly (holds
+the lock in the test thread, asserts a concurrent `init_repo()` call blocks until released)
+rather than relying on timing to reproduce the original race. Re-verified live afterward via
+[scripts/live_integration_test.py](../../scripts/live_integration_test.py) — clean pass.
+
+## 26. `ctx daemon` process disappeared mid-run, zero log trace — root cause undetermined
+
+**Files:** `data/ctx.log`, `src/app/cli/daemon.py`, `src/vcs/runtime.py`
+
+Found in the same live-test pass as #25, same session. `ctx daemon start` was running
+against `knowledge.example/`, actively processing real filesystem events (last log line at
+09:42:35 was a normal `[SUCCEEDED] modified_handle`, no error, no exception, no traceback).
+Some time later — after two plain `rm` calls on watched files that should have produced
+`deleted_handle` log lines — `ctx daemon status` reported `stopped`, and `tasklist` confirmed
+the PID from `data/ctx.pid` was genuinely gone, no `python.exe` process running at all.
+
+**No trace of why.** Spec 017's SIGTERM handler logs `"Received signal %s, stopping..."` on
+a clean stop; nothing in `data/ctx.log` says that, and nothing says an exception killed it
+either — the log simply stops. That rules out a caught, logged failure and points at
+something more abrupt: the process's thread crashing somewhere logging doesn't reach, or
+the process being torn down from outside (a signal `runtime.py`'s handler doesn't cover, or
+the parent shell/job-object relationship on Windows not fully detaching the child the way
+`_spawn`'s `DETACHED_PROCESS`/`CREATE_NEW_PROCESS_GROUP` flags intend — this session's shell
+tool is Git Bash over Windows, an environment `deploy/windows/register-ctx-daemon-task.ps1`
+doesn't exercise, since a Scheduled Task launches independently of any interactive shell).
+
+**Consequence, also live-confirmed:** restarting the daemon after this did **not** clean up
+mirror state for the two files that had been deleted from the source while it was down —
+`sync_source_status`'s restart-time reconciliation (see [STATE.md](STATE.md)) did not remove
+them from the git mirror. This is exactly the gap [FUTURE.md](FUTURE.md) item 5 already
+named as "not yet a live-observed problem" — it now is. Re-deleting the same files while the
+daemon was alive and watching in real time propagated correctly (`deleted_handle`, mirror
+updated) — so the gap is specifically the downtime window, not the delete path itself.
+
+**Not investigated further here** — reproducing this reliably (was it the Git Bash shell
+tearing down its process tree, a genuine crash, or something else) needs a dedicated repro
+attempt outside this live-test pass, ideally from a real terminal instead of the agent's
+shell tool. Flagging rather than guessing at a fix.
+
+**Update, same day, via [scripts/live_integration_test.py](../../scripts/live_integration_test.py)'s
+first automated run:** issue #27 below is very likely the real explanation. `_spawn()`
+launches the daemon with `DETACHED_PROCESS` (no console at all), which is exactly the flag
+combination Windows docs describe as unable to receive `GenerateConsoleCtrlEvent` later
+(issue #27) - and, separately, a process with no console of its own is also the more fragile
+half of "does it survive its parent shell tearing down" on Windows. Both symptoms trace back
+to the same `_spawn()` creation-flag choice; fixing #27 properly (switching away from
+`DETACHED_PROCESS`) should be evaluated for whether it also closes this one before treating
+them as two independent bugs.
+
+## 27. ~~`ctx daemon stop` crashes on every call on Windows — `CTRL_BREAK_EVENT` to a `DETACHED_PROCESS` child always fails~~ — FIXED
+
+**File:** `src/app/cli/daemon.py` (`_spawn`, `_send_stop_signal`)
+
+Found live (2026-09-09) on the first run of
+[scripts/live_integration_test.py](../../scripts/live_integration_test.py) - the script's own
+teardown step called `ctx daemon stop` on a daemon it had started, and the CLI crashed
+instead of stopping it:
+
+```
+OSError: [WinError 87] The parameter is incorrect
+```
+
+raised from `os.kill(pid, signal.CTRL_BREAK_EVENT)` in `_send_stop_signal` (`daemon.py:67`).
+Root cause: `_spawn()` (`daemon.py:52`) creates the daemon with
+`DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`. `DETACHED_PROCESS` means the child has **no
+console at all** - and `GenerateConsoleCtrlEvent` (what `os.kill(pid, CTRL_BREAK_EVENT)`
+calls on Windows) can only target a process group that has a console, which
+`CREATE_NEW_PROCESS_GROUP` alone would give it but `DETACHED_PROCESS` explicitly removes.
+The two flags were combined for opposite reasons - `DETACHED_PROCESS` so the daemon isn't
+tied to the launching terminal, `CREATE_NEW_PROCESS_GROUP` so it *can* receive
+`CTRL_BREAK_EVENT` later - and Windows' actual behavior is that the second intent is defeated
+by the first. This is not a one-off flake: every `ctx daemon stop` on Windows hits this,
+100% reproducible, confirmed by a second manual run right after the scripted one.
+
+**Consequence:** `ctx daemon stop` - spec 019's flagship feature, and the one
+`deploy/windows/register-ctx-daemon-task.ps1` and
+[docs/runbook-shared-install.md](../../runbook-shared-install.md) both assume works - is
+currently non-functional on Windows. `stop()`'s own force-kill fallback (`_force_kill`,
+`taskkill /F`) never runs, because the crash happens before that code path is reached, not
+after a timeout. `ctx daemon status` and `ctx daemon start` are unaffected - only `stop`
+calls `_send_stop_signal`. Worked around in this run via a direct `taskkill /F /PID <pid>`
+outside the CLI.
+
+**Fixed:** spec [023](../specs/023-daemon-stop-windows-cross-process.md). The actual fix
+differs from the "just drop `DETACHED_PROCESS`" guess above in one detail, found by
+experiment: `CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW` **also fails** the same way -
+`CREATE_NO_WINDOW` means no console is allocated at all, not just no *visible* window, same
+underlying problem as `DETACHED_PROCESS`. The combination that actually works cross-process
+(four flag/target combinations tested against a real child process) is
+`CREATE_NEW_PROCESS_GROUP` alone plus a `STARTUPINFO`/`SW_HIDE` to hide the now-real
+console's window after the fact. Separately, `vcs/runtime.py` only registered `SIGTERM`,
+never `SIGBREAK` (what `CTRL_BREAK_EVENT` maps to in Python on Windows) - confirmed by
+experiment that an unhandled `SIGBREAK` terminates the process outright, bypassing
+`run()`'s `except KeyboardInterrupt`/`self.stop()` cleanup entirely; both halves were
+needed. The regression test had to be rewritten once already during this fix: a first
+version spawned the "stop" step as a direct subprocess of the test process itself, which
+passed even against the *unfixed* code - Windows apparently grants a creator process's own
+descendants the same signal rights as the creator, so it never reproduced the real bug.
+The version that actually catches it runs `start()` and `stop()` as two fully independent,
+sibling OS processes (the starter already exited before the stopper runs), matching real
+`ctx daemon start` / `ctx daemon stop` CLI usage exactly -
+`test_ac1_stop_from_a_separate_process_does_not_raise`
+(`tests/integration/app/cli/test_daemon_lifecycle.py`). Re-verified live via both the direct
+CLI (`uv run ctx daemon start` then a separate `uv run ctx daemon stop` - clean, fast) and
+[scripts/live_integration_test.py](../../scripts/live_integration_test.py) (teardown now
+passes through the real `stop()` path, not the fallback force-kill it also carries).
+**#26 not independently re-confirmed** - plausible this was its root cause all along, but
+left open pending an actual fresh live observation, not closed on inference alone.
+
+## 28. ~~`rollback_session` crashes when an actor's earliest touch on a path predates that path's own history in a shared mirror repo~~ — FIXED
+
+**File:** `src/vcs/services/audit.py` (`rollback_session`)
+
+Found live (2026-09-09), same automated run as #27, in `scripts/live_integration_test.py`'s
+`E.rollback_session` step:
+
+```
+CalledProcessError: Command '['git', 'show', '180a5a75...:live-test-probe.md']'
+returned non-zero exit status 128
+```
+
+`rollback_session` (`audit.py:141-156`) treats `earliest["parent"] is None` as the *only*
+signal that an actor created a path (so it should be deleted, not reverted to parent
+content). That's correct only when the actor's earliest commit is the literal first commit
+in the whole mirror repo's history. Mirror repos are shared per watch-target *directory*
+(one repo can hold many files - `knowledge.example/docs/` mirrors `example_1.pdf`,
+`example_2.pdf`, `example_3.pdf`, and, in this run, the freshly created
+`live-test-probe.md`). The very first commit that ever touches a given *path* almost always
+has a non-`None` parent - the repo already has commits from other files - but that parent
+commit's tree still doesn't contain the new path, so `git show parent:relpath` fails exactly
+as seen here. `earliest["parent"] is None` under-detects "this actor created the path"; the
+correct check is whether `relpath` existed in `earliest["parent"]`'s tree, not whether
+`earliest["parent"]` exists at all.
+
+**Why the manual live-test pass (this session, same day) didn't hit it:** that pass reused
+`knowledge.example/prompts/live-test-probe.md` across several runs, so by the time
+`rollback-session` ran, the path already had its own multi-commit history within that actor's
+earliest commit's parent - the bug needs a path's *genuine* first-ever commit in a
+*non-empty* repo to surface, which the automated script's `docs/` target (also holding 3
+baseline PDFs) hit on its very first run.
+
+**Consequence:** `ctx rollback-session` crashes (uncaught `CalledProcessError`, CLI exits 1)
+instead of deleting the newly-created path, for any actor whose *only* contribution in a
+given repo is creating a brand-new file - arguably the single most common case for an
+MCP-driven session (`create_file` then a few edits). Worked around in this run via a direct
+file `unlink()` in the script's cleanup step, bypassing `rollback_session` entirely for that
+path.
+
+**Fixed:** spec [024](../specs/024-rollback-session-shared-repo-create.md). New primitive
+`git_store.path_exists_at_rev(repo_path, relpath, rev)` (`git cat-file -e`, never raises for
+a missing path - unlike `show()`); `rollback_session`'s create-vs-modify check became
+`earliest["parent"] is None or not path_exists_at_rev(...)`, covering both the original
+empty-repo case and this one. Regression test reproduces the exact shape that crashed live:
+an unrelated file committed first (different author), then the target actor creates a
+brand-new path in the same repo - `rollback_session` now deletes it instead of crashing.
+Re-verified live via [scripts/live_integration_test.py](../../scripts/live_integration_test.py) -
+`E.rollback_session` now passes.

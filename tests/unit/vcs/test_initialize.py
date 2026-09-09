@@ -6,6 +6,7 @@ import vcs.services.db as db_module
 import vcs.services.mirror_path as mirror_path
 import vcs.shared.config as shared_config
 from vcs.initialize import Initializer
+from vcs.services.git_store import show
 from vcs.shared.types import Query
 
 
@@ -48,7 +49,7 @@ def test_init_bootstraps_schema_config_snapshot_and_local_sources(
         repo_path, relpath = mirror_path.resolve_mirror_location(
             str(source_dir / "doc.txt"), [str(source_dir)]
         )
-        assert (repo_path / relpath).read_bytes() == b"hello world"
+        assert show(repo_path, relpath, "HEAD") == b"hello world"
 
         assert config_snapshot_file.exists()
         snapshot = yaml.safe_load(config_snapshot_file.read_text())

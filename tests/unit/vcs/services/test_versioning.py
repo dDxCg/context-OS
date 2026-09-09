@@ -3,7 +3,7 @@ import pytest
 import subprocess
 
 import vcs.services.mirror_path as mirror_path
-from vcs.services.git_store import head_rev
+from vcs.services.git_store import head_rev, path_exists_at_rev, show
 from vcs.services.versioning import (
     _resolve_actor,
     created_handle,
@@ -74,8 +74,9 @@ def test_ac1_created_handle_commits_to_git_not_versions_table(db_handler, tmp_pa
     assert versions == []
 
     repo_path, relpath = mirror_path.resolve_mirror_location(str(watched_file), [str(tmp_path)])
-    assert head_rev(repo_path, relpath) is not None
-    assert (repo_path / relpath).read_bytes() == b"hello world"
+    rev = head_rev(repo_path, relpath)
+    assert rev is not None
+    assert show(repo_path, relpath, rev) == b"hello world"
 
 
 def test_ac2_created_handle_recreate_same_content_no_duplicate_commit(db_handler, tmp_path):
@@ -111,7 +112,7 @@ def test_ac2_deleted_handle_marks_location_inactive_and_commits_removal(db_handl
         Query("SELECT status FROM locations WHERE location = ?", (str(watched),)), commit=False
     )
     assert rows == [(0,)]
-    assert not (repo_path / relpath).exists()
+    assert not path_exists_at_rev(repo_path, relpath, "HEAD")
     rev_after = head_rev(repo_path, relpath)
     assert rev_after is not None
     assert rev_after != rev_before
@@ -143,8 +144,8 @@ def test_ac1_moved_handle_renames_within_same_watch_target(db_handler, tmp_path,
 
     repo_path, dst_relpath = mirror_path.resolve_mirror_location(str(renamed), [str(tmp_path)])
     _, src_relpath = mirror_path.resolve_mirror_location(str(original), [str(tmp_path)])
-    assert (repo_path / dst_relpath).read_bytes() == b"data"
-    assert not (repo_path / src_relpath).exists()
+    assert show(repo_path, dst_relpath, "HEAD") == b"data"
+    assert not path_exists_at_rev(repo_path, src_relpath, "HEAD")
 
     import subprocess
     log = subprocess.run(
@@ -182,8 +183,8 @@ def test_ac3_moved_handle_across_watch_targets_writes_dst_and_removes_src(db_han
     src_repo, src_relpath = mirror_path.resolve_mirror_location(str(original), watch_targets)
     dst_repo, dst_relpath = mirror_path.resolve_mirror_location(str(moved), watch_targets)
     assert src_repo != dst_repo
-    assert not (src_repo / src_relpath).exists()
-    assert (dst_repo / dst_relpath).read_bytes() == b"cross-repo data"
+    assert not path_exists_at_rev(src_repo, src_relpath, "HEAD")
+    assert show(dst_repo, dst_relpath, "HEAD") == b"cross-repo data"
 
 
 def test_ec1_deleted_handle_outside_watch_targets_raises_path_not_watched(db_handler, tmp_path):
@@ -366,7 +367,7 @@ def test_ac5_modified_handle_creates_context_when_none_tracked_yet(db_handler, t
     assert len(contexts) == 1
     assert versions == []
     repo_path, relpath = mirror_path.resolve_mirror_location(str(watched), [str(tmp_path)])
-    assert (repo_path / relpath).read_bytes() == b"brand new content"
+    assert show(repo_path, relpath, "HEAD") == b"brand new content"
 
 
 def test_ac3_modified_handle_commits_when_similarity_below_threshold(
@@ -392,7 +393,7 @@ def test_ac3_modified_handle_commits_when_similarity_below_threshold(
     assert versions == []
     assert _log_count(repo_path) == 2
     assert head_rev(repo_path, relpath) != first_rev
-    assert (repo_path / relpath).read_bytes() == new_text.encode()
+    assert show(repo_path, relpath, "HEAD") == new_text.encode()
 
 
 def test_ac4_modified_handle_skips_commit_when_similarity_above_threshold(

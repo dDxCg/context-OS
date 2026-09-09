@@ -1,5 +1,6 @@
 import logging
 import signal
+import sys
 import threading
 
 from vcs.workers.local.local_runtime import LocalRuntime
@@ -16,6 +17,13 @@ class VCSRuntime:
     def run(self):
         self.initializer.init()
         signal.signal(signal.SIGTERM, self._handle_signal)
+        if sys.platform == "win32":
+            # `ctx daemon stop` (spec 023) signals via CTRL_BREAK_EVENT on
+            # Windows, which Python surfaces as SIGBREAK, not SIGTERM - an
+            # unhandled SIGBREAK terminates the process outright (not even
+            # a catchable KeyboardInterrupt), bypassing this class's own
+            # cleanup entirely unless it's registered explicitly here too.
+            signal.signal(signal.SIGBREAK, self._handle_signal)
 
         try:
             self.local_runtime.run()

@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  chrono-ctx watch daemon, as a macOS launchd user agent.
+
+  Install (helpdesk / operator, run once on the shared machine):
+    cp deploy/launchd/local.chrono-ctx.daemon.plist ~/Library/LaunchAgents/
+    # edit WorkingDirectory and the uv path below to match the actual install first
+    launchctl load ~/Library/LaunchAgents/local.chrono-ctx.daemon.plist
+
+  RunAtLoad only (no KeepAlive): `uv run ctx daemon start` spawns a detached
+  child and returns immediately (see spec 019) - it is meant to run once at
+  login, not be supervised as a long-lived foreground process itself.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>local.chrono-ctx.daemon</string>
+    <key>WorkingDirectory</key>
+    <string>/path/to/chrono-ctx</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/env</string>
+        <string>uv</string>
+        <string>run</string>
+        <string>ctx</string>
+        <string>daemon</string>
+        <string>start</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/tmp/chrono-ctx-launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/chrono-ctx-launchd.log</string>
+</dict>
+</plist>

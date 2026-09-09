@@ -1,3 +1,4 @@
+import os
 import subprocess
 import threading
 from dataclasses import dataclass
@@ -61,68 +62,151 @@ class ConcurrentEditError(RuntimeError):
         self.current_timestamp = current_timestamp
 
 
+def _is_initialized(repo_path: Path) -> bool:
+    """Either shape counts: `.git/` (old-style, non-bare - every mirror
+    repo created before spec 025) or HEAD+objects/ directly under
+    repo_path (new-style, bare)."""
+    if (repo_path / ".git").is_dir():
+        return True
+    return (repo_path / "HEAD").is_file() and (repo_path / "objects").is_dir()
+
+
 def _require_initialized(repo_path: Path) -> None:
-    if not (repo_path / ".git").is_dir():
+    if not _is_initialized(repo_path):
         raise RepoNotInitializedError(
             f"{repo_path} has no .git - call init_repo() first"
         )
 
 
 def init_repo(repo_path: Path) -> None:
-    """Create repo_path (and parents) if needed, run `git init` if not
-    already a repo. Idempotent."""
+    """Create repo_path (and parents) if needed, `git init --bare` if not
+    already a repo (of either shape - see _is_initialized). Idempotent.
+
+    A genuinely new repo is created bare (spec 025): no working tree, so
+    write()/remove()/move() never duplicate a file's current content
+    on disk beyond the object store. Already-initialized repos (bare or
+    not - every repo from before spec 025 is non-bare) are left alone
+    entirely, not just left non-bare - running `git init --bare` again
+    against an existing *non-bare* repo would create a second, orphaned
+    bare git-dir alongside the real `.git/`, silently hiding its history,
+    not convert it. write()/remove()/move() work correctly against a
+    pre-existing non-bare repo unmodified (spec 025 AC-9) - no migration
+    needed for old repos to keep working, only new repos get the storage
+    win immediately.
+
+    Serialized via the same cross-process lock write()/remove()/move() use
+    (spec 022, issue #25) - two processes racing `git init`/`git
+    config` against the same repo can interleave and fail (CalledProcessError
+    exit 128, observed live)."""
     repo_path.mkdir(parents=True, exist_ok=True)
-    try:
+    with _lock_for(repo_path):
+        if not _is_initialized(repo_path):
+            try:
+                subprocess.run(
+                    ["git", "init", "--bare"],
+                    cwd=str(repo_path),
+                    check=True,
+                    capture_output=True,
+                )
+            except FileNotFoundError as exc:
+                raise GitNotAvailableError(
+                    "no `git` binary found on PATH"
+                ) from exc
+        # Local, per-repo committer identity - independent of any global git
+        # config on the host, and separate from --author (the actor), which
+        # write() sets per commit.
         subprocess.run(
-            ["git", "init"],
-            cwd=str(repo_path),
-            check=True,
-            capture_output=True,
+            ["git", "config", "user.email", "vcs@chrono-ctx.local"],
+            cwd=str(repo_path), check=True, capture_output=True,
         )
-    except FileNotFoundError as exc:
-        raise GitNotAvailableError(
-            "no `git` binary found on PATH"
-        ) from exc
-    # Local, per-repo committer identity - independent of any global git
-    # config on the host, and separate from --author (the actor), which
-    # write() sets per commit.
-    subprocess.run(
-        ["git", "config", "user.email", "vcs@chrono-ctx.local"],
-        cwd=str(repo_path), check=True, capture_output=True,
+        subprocess.run(
+            ["git", "config", "user.name", "chrono-ctx"],
+            cwd=str(repo_path), check=True, capture_output=True,
+        )
+
+
+def _parse_author(author: str) -> tuple[str, str]:
+    """"Name <email>" -> ("Name", "email") - commit-tree has no --author
+    flag like porcelain `git commit`; author/committer identity is set via
+    GIT_AUTHOR_*/GIT_COMMITTER_* env vars instead."""
+    name, _, rest = author.partition("<")
+    return name.strip(), rest.rstrip(">").strip()
+
+
+def _commit_env(author: str) -> dict:
+    name, email = _parse_author(author)
+    return {
+        **os.environ,
+        "GIT_AUTHOR_NAME": name, "GIT_AUTHOR_EMAIL": email,
+        "GIT_COMMITTER_NAME": "chrono-ctx", "GIT_COMMITTER_EMAIL": "vcs@chrono-ctx.local",
+    }
+
+
+def _hash_object(repo_path: Path, content: bytes) -> str:
+    result = subprocess.run(
+        ["git", "hash-object", "-w", "--stdin"],
+        cwd=str(repo_path), input=content, check=True, capture_output=True,
     )
+    return result.stdout.decode().strip()
+
+
+def _write_tree(repo_path: Path) -> str:
+    result = subprocess.run(
+        ["git", "write-tree"], cwd=str(repo_path), check=True, capture_output=True, text=True,
+    )
+    return result.stdout.strip()
+
+
+def _tree_of(repo_path: Path, commit: str) -> str:
+    result = subprocess.run(
+        ["git", "rev-parse", f"{commit}^{{tree}}"],
+        cwd=str(repo_path), check=True, capture_output=True, text=True,
+    )
+    return result.stdout.strip()
+
+
+def _commit_tree(repo_path: Path, tree_sha: str, parent: str | None, message: str, author: str) -> str:
+    cmd = ["git", "commit-tree", tree_sha, "-m", message]
+    if parent is not None:
+        cmd += ["-p", parent]
+    result = subprocess.run(
+        cmd, cwd=str(repo_path), check=True, capture_output=True, text=True,
+        env=_commit_env(author),
+    )
+    return result.stdout.strip()
+
+
+def _update_ref_head(repo_path: Path, new_rev: str) -> None:
     subprocess.run(
-        ["git", "config", "user.name", "chrono-ctx"],
+        ["git", "update-ref", "HEAD", new_rev],
         cwd=str(repo_path), check=True, capture_output=True,
     )
 
 
 def write(repo_path: Path, relpath: str, content: bytes, message: str, author: str) -> str:
-    """Write content to repo_path/relpath and commit it."""
+    """Hash content into the object store, stage it in the index, and
+    commit - no working-tree file is ever created (spec 025). The index
+    persists across calls (a plain file under the repo dir, independent of
+    any working tree) and already reflects HEAD's tree from prior calls -
+    `--add` both adds a never-seen path and updates an already-tracked
+    one, so this works identically for the first write to a path and every
+    later overwrite."""
     _require_initialized(repo_path)
     with _lock_for(repo_path):
-        target = repo_path / relpath
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(content)
-
+        blob_sha = _hash_object(repo_path, content)
         subprocess.run(
-            ["git", "add", relpath],
+            ["git", "update-index", "--add", "--cacheinfo", f"100644,{blob_sha},{relpath}"],
             cwd=str(repo_path), check=True, capture_output=True,
         )
-
-        staged_diff = subprocess.run(
-            ["git", "diff", "--cached", "--quiet"],
-            cwd=str(repo_path),
-        )
-        if staged_diff.returncode == 0:
-            # Nothing staged - content is byte-identical to what's already
+        new_tree = _write_tree(repo_path)
+        parent = _rev_parse_or_none(repo_path, "HEAD")
+        if parent is not None and new_tree == _tree_of(repo_path, parent):
+            # Nothing changed - content is byte-identical to what's already
             # committed. Not an error: return the rev it's already at.
-            return _rev_parse(repo_path, "HEAD")
-
-        subprocess.run(
-            ["git", "commit", f"--author={author}", "-m", message],
-            cwd=str(repo_path), check=True, capture_output=True,
-        )
-        return _rev_parse(repo_path, "HEAD")
+            return parent
+        new_rev = _commit_tree(repo_path, new_tree, parent, message, author)
+        _update_ref_head(repo_path, new_rev)
+        return new_rev
 
 
 def head_rev(repo_path: Path, relpath: str) -> str | None:
@@ -141,57 +225,80 @@ def head_rev(repo_path: Path, relpath: str) -> str | None:
     return result.stdout.strip() or None
 
 
-def _rev_parse(repo_path: Path, ref: str) -> str:
+def _rev_parse_or_none(repo_path: Path, ref: str) -> str | None:
+    """Like _rev_parse, but None instead of raising for an unborn HEAD (a
+    repo with zero commits yet - ref simply doesn't resolve). --verify,
+    not plain rev-parse: on a *bare* repo specifically, plain `git
+    rev-parse HEAD` on an unborn HEAD exits 0 and prints the literal
+    string "HEAD" unresolved (confirmed by experiment - a non-bare repo
+    correctly exits non-zero for the same case). --verify guarantees a
+    real SHA-1 or a non-zero exit, identically for both repo shapes."""
     result = subprocess.run(
-        ["git", "rev-parse", ref],
-        cwd=str(repo_path), check=True, capture_output=True, text=True,
+        ["git", "rev-parse", "--verify", ref], cwd=str(repo_path), capture_output=True, text=True,
     )
+    if result.returncode != 0:
+        return None
     return result.stdout.strip()
 
 
 def remove(repo_path: Path, relpath: str, message: str, author: str) -> str | None:
     """Remove relpath (file or directory subtree) from the mirror and
-    commit. -r is harmless on a single file; --ignore-unmatch makes an
-    untracked/already-gone path a clean no-op instead of a
-    CalledProcessError. Returns the new rev, or None if nothing was
-    actually removed."""
+    commit. Returns the new rev, or None if nothing was actually removed
+    (relpath, and everything under it, already untracked at HEAD - matches
+    the old `--ignore-unmatch` no-op contract). `git rm --cached` (index-
+    only, `-r` recurses a directory prefix exactly like the old porcelain
+    `git rm -r` did) instead of `git update-index --force-remove`, which
+    (confirmed by experiment) refuses to run at all without a work tree -
+    `--cached` is the one `git rm` mode that operates purely on the index."""
     _require_initialized(repo_path)
     with _lock_for(repo_path):
-        subprocess.run(
-            ["git", "rm", "-r", "--ignore-unmatch", "--quiet", relpath],
-            cwd=str(repo_path), check=True, capture_output=True,
-        )
-        staged_diff = subprocess.run(
-            ["git", "diff", "--cached", "--quiet"],
-            cwd=str(repo_path),
-        )
-        if staged_diff.returncode == 0:
+        parent = _rev_parse_or_none(repo_path, "HEAD")
+        if parent is None or not path_exists_at_rev(repo_path, relpath, parent):
             return None
         subprocess.run(
-            ["git", "commit", f"--author={author}", "-m", message],
+            ["git", "rm", "--cached", "-r", "--ignore-unmatch", "--quiet", relpath],
             cwd=str(repo_path), check=True, capture_output=True,
         )
-        return _rev_parse(repo_path, "HEAD")
+        new_tree = _write_tree(repo_path)
+        new_rev = _commit_tree(repo_path, new_tree, parent, message, author)
+        _update_ref_head(repo_path, new_rev)
+        return new_rev
+
+
+def _ls_tree_entry(repo_path: Path, rev: str, relpath: str) -> tuple[str, str]:
+    """(mode, blob_sha) for relpath in rev's tree."""
+    result = subprocess.run(
+        ["git", "ls-tree", rev, "--", relpath],
+        cwd=str(repo_path), check=True, capture_output=True, text=True,
+    )
+    meta, _, _ = result.stdout.strip().partition("\t")
+    mode, _obj_type, sha = meta.split(" ")
+    return mode, sha
 
 
 def move(repo_path: Path, src_relpath: str, dst_relpath: str, message: str, author: str) -> str | None:
-    """git mv src_relpath dst_relpath + commit. Returns the new rev, or
-    None if src_relpath doesn't exist on disk (nothing to move)."""
+    """Relocate src_relpath's tracked blob to dst_relpath and commit.
+    Returns the new rev, or None if src_relpath isn't tracked at HEAD
+    (nothing to move) - reuses the blob already in the tree by SHA, never
+    re-reads content from disk (there's no working-tree file to read)."""
     _require_initialized(repo_path)
     with _lock_for(repo_path):
-        if not (repo_path / src_relpath).exists():
+        parent = _rev_parse_or_none(repo_path, "HEAD")
+        if parent is None or not path_exists_at_rev(repo_path, src_relpath, parent):
             return None
-        dst_path = repo_path / dst_relpath
-        dst_path.parent.mkdir(parents=True, exist_ok=True)
+        mode, blob_sha = _ls_tree_entry(repo_path, parent, src_relpath)
         subprocess.run(
-            ["git", "mv", src_relpath, dst_relpath],
+            ["git", "update-index", "--add", "--cacheinfo", f"{mode},{blob_sha},{dst_relpath}"],
             cwd=str(repo_path), check=True, capture_output=True,
         )
         subprocess.run(
-            ["git", "commit", f"--author={author}", "-m", message],
+            ["git", "rm", "--cached", "-r", "--ignore-unmatch", "--quiet", src_relpath],
             cwd=str(repo_path), check=True, capture_output=True,
         )
-        return _rev_parse(repo_path, "HEAD")
+        new_tree = _write_tree(repo_path)
+        new_rev = _commit_tree(repo_path, new_tree, parent, message, author)
+        _update_ref_head(repo_path, new_rev)
+        return new_rev
 
 
 def commit_info(repo_path: Path, relpath: str) -> CommitInfo | None:
@@ -235,6 +342,19 @@ def diff(repo_path: Path, relpath: str, rev1: str, rev2: str) -> str:
         cwd=str(repo_path), check=True, capture_output=True, text=True,
     )
     return result.stdout
+
+
+def path_exists_at_rev(repo_path: Path, relpath: str, rev: str) -> bool:
+    """Whether relpath existed in rev's tree. Not existing is a normal,
+    expected outcome here (e.g. rev predates the path ever being created in
+    a shared mirror repo - spec 024, issue #28), not an error - unlike
+    show(), this never raises for a missing path."""
+    _require_initialized(repo_path)
+    result = subprocess.run(
+        ["git", "cat-file", "-e", f"{rev}:{relpath}"],
+        cwd=str(repo_path), capture_output=True,
+    )
+    return result.returncode == 0
 
 
 def show(repo_path: Path, relpath: str, rev: str) -> bytes:

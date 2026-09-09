@@ -1,3 +1,5 @@
+import sys
+
 import pytest
 
 import app.cli.daemon as daemon
@@ -91,6 +93,32 @@ def test_ac7_stop_is_a_noop_when_already_stopped(monkeypatch):
     stopped = daemon.stop()
 
     assert stopped is False
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only creationflags")
+def test_ac2_spawn_does_not_use_detached_process_on_windows(monkeypatch):
+    """Spec 023 AC-2 / issue #27: DETACHED_PROCESS (and CREATE_NO_WINDOW)
+    leave the child with no console at all, which breaks cross-process
+    CTRL_BREAK_EVENT delivery - confirmed by experiment, see the spec."""
+    import subprocess as subprocess_module
+
+    captured = {}
+
+    class FakeProc:
+        pid = 4242
+
+    def fake_popen(*args, **kwargs):
+        captured.update(kwargs)
+        return FakeProc()
+
+    monkeypatch.setattr(subprocess_module, "Popen", fake_popen)
+
+    daemon._spawn()
+
+    flags = captured["creationflags"]
+    assert not flags & subprocess_module.DETACHED_PROCESS
+    assert flags & subprocess_module.CREATE_NEW_PROCESS_GROUP
+    assert captured["startupinfo"].wShowWindow == subprocess_module.SW_HIDE
 
 
 def test_ec1_stop_escalates_after_timeout(monkeypatch):

@@ -1,0 +1,28 @@
+# chrono-ctx watch daemon, as a systemd user service.
+#
+# Install (helpdesk / operator, run once on the shared machine):
+#   mkdir -p ~/.config/systemd/user
+#   cp deploy/systemd/ctx-daemon.service ~/.config/systemd/user/
+#   # edit WorkingDirectory below to the actual repo path first
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now ctx-daemon
+#   loginctl enable-linger <user>   # so it also starts before any login
+#
+# Type=oneshot + RemainAfterExit=yes because `uv run ctx daemon start` spawns
+# a detached child and returns immediately (see spec 019) - it is not a
+# long-running foreground process, so Type=simple would report the unit as
+# failed the instant the parent exits.
+
+[Unit]
+Description=chrono-ctx watch daemon
+After=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/path/to/chrono-ctx
+ExecStart=/usr/bin/env uv run ctx daemon start
+ExecStop=/usr/bin/env uv run ctx daemon stop
+
+[Install]
+WantedBy=default.target

@@ -197,7 +197,34 @@ def test_ac4_rollback_session_deletes_path_actor_created(config_path, tmp_path):
 
     assert result == {"rolled_back": [relpath], "failed": []}
     assert not tracked.exists()
-    assert not (repo_path / relpath).exists()
+    assert not git_store.path_exists_at_rev(repo_path, relpath, "HEAD")
+
+
+def test_ac1_rollback_session_deletes_path_created_in_a_shared_repo_with_prior_history(config_path, tmp_path):
+    """Spec 024 AC-1 / issue #28: the repo already has an unrelated commit
+    from a different author before the target actor creates a brand-new
+    path in it - earliest["parent"] is not None here, unlike
+    test_ac4 above, so the fix must check tree membership, not just
+    whether a parent commit exists at all."""
+    source_dir = _source_dir(config_path, tmp_path)
+    unrelated = source_dir / "baseline.txt"
+    tracked = source_dir / "new.txt"
+    watch_targets = [str(source_dir)]
+    repo_path, unrelated_relpath = mirror_path.resolve_mirror_location(str(unrelated), watch_targets)
+    _, relpath = mirror_path.resolve_mirror_location(str(tracked), watch_targets)
+    git_store.init_repo(repo_path)
+    git_store.write(
+        repo_path, unrelated_relpath, b"baseline", message="baseline",
+        author="human:alice <human@chrono-ctx.local>",
+    )
+    git_store.write(repo_path, relpath, b"created", message="create", author="agent:s1 <agent@chrono-ctx.local>")
+    tracked.write_bytes(b"created")
+
+    result = audit.rollback_session("agent:s1", watch_targets=watch_targets)
+
+    assert result == {"rolled_back": [relpath], "failed": []}
+    assert not tracked.exists()
+    assert not git_store.path_exists_at_rev(repo_path, relpath, "HEAD")
 
 
 def test_ac5_rollback_session_spans_multiple_watch_targets(config_path, tmp_path):
@@ -276,7 +303,7 @@ def test_ec4_rollback_session_reports_concurrent_edit_as_failed(config_path, tmp
     assert result["rolled_back"] == [ok_rel]
     assert len(result["failed"]) == 1
     assert result["failed"][0]["path"] == contested_rel
-    assert (repo_path / contested_rel).read_bytes() == b"v_other"
+    assert git_store.show(repo_path, contested_rel, "HEAD") == b"v_other"
 
 
 def test_ec1_rollback_session_refuses_unknown_filesystem():

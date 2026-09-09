@@ -145,7 +145,10 @@ def rollback_session(actor_label: str, watch_targets: list[str] | None = None) -
                         info.author if info else "", info.timestamp if info else "",
                     )
 
-                if earliest["parent"] is None:
+                actor_created_path = earliest["parent"] is None or not git_store.path_exists_at_rev(
+                    repo_path, relpath, earliest["parent"]
+                )
+                if actor_created_path:
                     git_store.remove(
                         repo_path, relpath,
                         message=f"rollback session {actor_label}: undo create of {relpath}",
