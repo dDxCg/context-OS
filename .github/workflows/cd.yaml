@@ -1,0 +1,99 @@
+name: CD
+
+on:
+  # Fires after CI finishes for the same commit, not on the tag push
+  # directly - a tag alone proves nothing about whether it's actually
+  # green. ci.yaml now also runs on `v*.*.*` tag pushes (see its own
+  # comment), so every tag gets a real CI run first; this workflow only
+  # continues once that run's conclusion is known.
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+jobs:
+
+  build-and-smoke-test:
+    # Only proceed for a CI run that (a) actually passed, (b) was itself
+    # triggered by a push (not a PR), and (c) was a tag push - workflow_run's
+    # head_branch is the tag name itself for a tag-triggered run (e.g.
+    # "v1.2.3"), never "main"/"develop", so startsWith(..., 'v') is enough
+    # to isolate a release tag given this repo's naming.
+    if: |
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      startsWith(github.event.workflow_run.head_branch, 'v')
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout the tagged commit
+        uses: actions/checkout@v6
+        with:
+          # workflow_run checks out the default branch by default - the
+          # tagged commit has to be requested explicitly, or every step
+          # below silently builds/publishes the wrong tree.
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+      - name: Verify tag matches pyproject.toml version
+        env:
+          # $GITHUB_REF_NAME here would be this workflow's own trigger
+          # (workflow_run, on the default branch) - the tag name only
+          # exists on the upstream CI run's event, not this one's.
+          TAG_NAME: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          python <<'EOF'
+          import os, re, sys
+          tag_version = os.environ["TAG_NAME"].lstrip("v")
+          text = open("pyproject.toml").read()
+          match = re.search(r'(?m)^version\s*=\s*"([^"]+)"', text)
+          pyproject_version = match.group(1) if match else None
+          if tag_version != pyproject_version:
+              sys.exit(
+                  f"tag version ({tag_version}) != pyproject.toml version ({pyproject_version})"
+              )
+          EOF
+
+      - name: Build
+        run: uv build
+
+      - name: Install the built wheel into a fresh venv and smoke test
+        run: |
+          python -m venv /tmp/smoke-venv
+          /tmp/smoke-venv/bin/pip install dist/*.whl
+          /tmp/smoke-venv/bin/ctx --help
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    # No `if:` needed here - a skipped/failed build-and-smoke-test job
+    # (including its own `if:` evaluating false) makes this job's default
+    # `needs:` gating skip it too.
+    needs: build-and-smoke-test
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+      - name: Publish to PyPI
+        run: uv publish

@@ -5,6 +5,12 @@ on:
     branches:
       - main
       - develop
+    # A release tag must run through the same CI this workflow already
+    # gives every branch push - cd.yaml listens for *this* workflow's
+    # completion (workflow_run) rather than re-testing, so a tag push has
+    # to actually reach here first or CD never fires at all.
+    tags:
+      - "v*.*.*"
 
   pull_request:
 
