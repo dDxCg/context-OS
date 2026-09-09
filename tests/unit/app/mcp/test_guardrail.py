@@ -131,6 +131,123 @@ async def test_ac6_write_file_sets_a_pending_actor_hint(source_dir, db_path):
 
 
 @pytest.mark.anyio
+async def test_ac2_write_file_with_matching_expected_version_succeeds(source_dir):
+    target = source_dir / "doc.txt"
+    target.write_text("old content")
+    watch_targets = derive_watch_targets()
+    repo_path, relpath = mirror_path.resolve_mirror_location(str(target), watch_targets)
+    git_store.init_repo(repo_path)
+    current_rev = git_store.write(
+        repo_path, relpath, b"old content",
+        message="seed", author="test <test@chrono-ctx.local>",
+    )
+
+    async with Client(server.mcp, elicitation_handler=_fail_if_called) as client:
+        result = await client.call_tool(
+            "write_file",
+            {"path": str(target), "content": "new content", "expected_version": current_rev},
+        )
+
+    assert result.data == {"status": "ok"}
+    assert target.read_text() == "new content"
+
+
+@pytest.mark.anyio
+async def test_ac3_write_file_with_stale_expected_version_returns_conflict(source_dir, db_path):
+    target = source_dir / "doc.txt"
+    target.write_text("old content")
+    watch_targets = derive_watch_targets()
+    repo_path, relpath = mirror_path.resolve_mirror_location(str(target), watch_targets)
+    git_store.init_repo(repo_path)
+    git_store.write(
+        repo_path, relpath, b"old content",
+        message="seed", author="test <test@chrono-ctx.local>",
+    )
+    current_rev = git_store.write(
+        repo_path, relpath, b"someone else's edit",
+        message="someone else", author="other <other@chrono-ctx.local>",
+    )
+
+    async with Client(server.mcp, elicitation_handler=_fail_if_called) as client:
+        result = await client.call_tool(
+            "write_file",
+            {"path": str(target), "content": "my stale edit", "expected_version": "stale-rev"},
+        )
+
+    assert result.data["status"] == "conflict"
+    assert result.data["current_version"] == current_rev
+    assert target.read_text() == "old content"
+
+    conn = sqlite3.connect(str(db_path))
+    db_handler = server.DBHandler(conn)
+    actor = consume_hint(db_handler, str(target))
+    conn.close()
+    assert actor is None
+
+
+@pytest.mark.anyio
+async def test_ac4_delete_file_with_matching_expected_version_succeeds(source_dir):
+    target = source_dir / "doc.txt"
+    target.write_text("content")
+    watch_targets = derive_watch_targets()
+    repo_path, relpath = mirror_path.resolve_mirror_location(str(target), watch_targets)
+    git_store.init_repo(repo_path)
+    current_rev = git_store.write(
+        repo_path, relpath, b"content",
+        message="seed", author="test <test@chrono-ctx.local>",
+    )
+
+    async with Client(server.mcp, elicitation_handler=_fail_if_called) as client:
+        result = await client.call_tool(
+            "delete_file", {"path": str(target), "expected_version": current_rev}
+        )
+
+    assert result.data == {"status": "ok"}
+    assert not target.exists()
+
+
+@pytest.mark.anyio
+async def test_ac4_delete_file_with_stale_expected_version_returns_conflict(source_dir):
+    target = source_dir / "doc.txt"
+    target.write_text("content")
+    watch_targets = derive_watch_targets()
+    repo_path, relpath = mirror_path.resolve_mirror_location(str(target), watch_targets)
+    git_store.init_repo(repo_path)
+    git_store.write(
+        repo_path, relpath, b"content",
+        message="seed", author="test <test@chrono-ctx.local>",
+    )
+
+    async with Client(server.mcp, elicitation_handler=_fail_if_called) as client:
+        result = await client.call_tool(
+            "delete_file", {"path": str(target), "expected_version": "stale-rev"}
+        )
+
+    assert result.data["status"] == "conflict"
+    assert target.exists()
+
+
+@pytest.mark.anyio
+async def test_ac5_conflict_does_not_persist_the_scope_grant(config_path, tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_config(config_path, [{"type": "local", "path": str(source)}])
+    outside = tmp_path / "outside" / "doc.txt"
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    outside.write_text("hi")
+    before = config_path.read_bytes()
+
+    async with Client(server.mcp, elicitation_handler=_approve) as client:
+        result = await client.call_tool(
+            "write_file",
+            {"path": str(outside), "content": "x", "expected_version": "stale-rev"},
+        )
+
+    assert result.data["status"] == "conflict"
+    assert config_path.read_bytes() == before
+
+
+@pytest.mark.anyio
 async def test_create_file_writes_content_and_makes_parent_dirs(source_dir):
     target = source_dir / "nested" / "doc.txt"
 

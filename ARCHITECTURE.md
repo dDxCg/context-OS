@@ -282,9 +282,23 @@ structurally never produce a real git merge conflict — only a stale-read
 overwrite. `write_with_check(expected_rev=...)` is an optimistic
 compare-and-swap: if the mirror's current head has moved past
 `expected_rev`, it raises `ConcurrentEditError` with the current rev/author/
-timestamp instead of committing. `rollback_source` (spec 012) is its one
-real caller today — a rollback racing a concurrent newer commit raises
-`ConcurrentEditError` instead of clobbering it.
+timestamp instead of committing. `rollback_source` (spec 012) and
+`rollback_session` (spec 020) both use it — a rollback racing a concurrent
+newer commit raises `ConcurrentEditError` instead of clobbering it, and for
+`rollback_session` that means one path failing the batch rather than the
+whole session's restore silently overwriting someone else's later edit.
+
+**The same gate, weaker, on MCP writes.** `write_file`/`delete_file` (spec
+021) take an optional `expected_version`, checked against
+`current_version(path)` before any filesystem I/O — but this can't be the
+same atomic check-and-commit `write_with_check` gives the rollback callers,
+because MCP write tools don't commit synchronously (§6.2: the watcher
+commits later, asynchronously). The check only narrows the lost-update
+window to the watcher's debounce-plus-dispatch latency; a second writer
+racing inside that window still wins silently. `create_file`/`move_file`
+don't have this parameter — see
+[021-mcp-optimistic-concurrency.md](docs/specs/021-mcp-optimistic-concurrency.md)
+for why their conflict shape differs.
 
 ### 6.2 Actor attribution
 

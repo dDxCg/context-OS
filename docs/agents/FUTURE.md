@@ -18,17 +18,28 @@ else after the session is refused for that one path rather than silently discard
 too broad to be "one session." See
 [020-rollback-session.md](../specs/020-rollback-session.md).
 
-## 2. Optimistic-concurrency gate beyond `rollback` — partially done
+## 2. ~~Optimistic-concurrency gate beyond `rollback`~~ — done for the lost-update case
+(spec 021)
 
-`git_store.write_with_check(expected_rev=...)` (spec 012) is now wired into two callers:
-`rollback_source` and `rollback_session` (spec 020). MCP write tools (`write_file`/
-`create_file`/...) and general CLI writes still do plain filesystem I/O with no
-expected-revision check — two concurrent
-writers to the same path (two agent sessions, or MCP racing a human edit) is a silent
-lost-update, not a detected conflict. This was flagged early as "conflict-ux" — turned out
-to need no conflict-marker translation layer (the single-writer lock means there's
-structurally never a git *merge* conflict, only a lost-update race), just this gate wired
-more broadly.
+`git_store.write_with_check(expected_rev=...)` (spec 012) is wired into `rollback_source`
+and `rollback_session` (spec 020). MCP `write_file`/`delete_file` (spec 021) now take an
+optional `expected_version`, checked against `current_version(path)` before any I/O — a
+mismatch returns `{"status": "conflict", ...}` instead of silently clobbering. This was
+flagged early as "conflict-ux" — turned out to need no conflict-marker translation layer
+(the single-writer lock means there's structurally never a git *merge* conflict, only a
+lost-update race), just this gate wired more broadly.
+
+**Known limitation, by architecture, not an oversight:** MCP write tools don't commit
+synchronously (the watcher does, asynchronously, after the tool call returns — see spec
+013), so this check can only compare *at call time*. It narrows the lost-update window
+(to the watcher's debounce-plus-dispatch latency, sub-second in practice) rather than
+eliminating it the way `write_with_check` does for `rollback_source`/`rollback_session`,
+where the check and the commit are one atomic call.
+
+**Still out of scope:** `create_file` (different conflict shape — "did someone else already
+create this path," no version to have read beforehand) and `move_file` (a location change,
+not a content edit against a previously-read version). See
+[021-mcp-optimistic-concurrency.md](../specs/021-mcp-optimistic-concurrency.md).
 
 ## 3. Non-technical approval channel
 

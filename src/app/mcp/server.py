@@ -14,6 +14,23 @@ mcp = FastMCP("chrono-ctx")
 
 DENIED = {"status": "denied", "reason": "path out of scope"}
 
+
+def _check_expected_version(path: str, expected_version: str | None):
+    """Optimistic-concurrency pre-check (spec 021). Only compares against
+    current_version() at call time - the watcher commits asynchronously
+    after this returns, so this narrows the lost-update window rather than
+    eliminating it (see 021-mcp-optimistic-concurrency.md's Context)."""
+    if expected_version is None:
+        return None
+    actual = current_version(path)
+    if actual != expected_version:
+        return {
+            "status": "conflict",
+            "reason": f"{path}: expected version {expected_version!r}, current is {actual!r}",
+            "current_version": actual,
+        }
+    return None
+
 # Every failure path returns a status dict rather than raising, so the caller
 # always gets a structured result. shutil.Error and UnicodeError are listed
 # explicitly because neither is an OSError subclass - UnicodeDecodeError and
@@ -67,10 +84,13 @@ async def read_file(path: str, ctx: Context):
     }
 
 @mcp.tool()
-async def write_file(path: str, content: str, ctx: Context):
+async def write_file(path: str, content: str, ctx: Context, expected_version: str | None = None):
     grant = await ensure_scope(ctx, path)
     if not grant:
         return DENIED
+    conflict = _check_expected_version(path, expected_version)
+    if conflict:
+        return conflict
     _set_actor_hint(path, ctx)
     try:
         save_to_file(content, path, mode="w")
@@ -98,10 +118,13 @@ async def create_file(path: str, content: str, ctx: Context):
     }
 
 @mcp.tool()
-async def delete_file(path: str, ctx: Context):
+async def delete_file(path: str, ctx: Context, expected_version: str | None = None):
     grant = await ensure_scope(ctx, path)
     if not grant:
         return DENIED
+    conflict = _check_expected_version(path, expected_version)
+    if conflict:
+        return conflict
     _set_actor_hint(path, ctx)
     try:
         Path(path).unlink()
