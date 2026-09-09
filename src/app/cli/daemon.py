@@ -5,10 +5,11 @@ import sys
 import time
 from pathlib import Path
 
-from utils.helper import anchored
+from utils.helper import anchored, get_stop_sentinel_path
 
 PID_PATH = Path(anchored("data/ctx.pid"))
 LOG_PATH = Path(anchored("data/ctx.log"))
+STOP_SENTINEL_PATH = Path(get_stop_sentinel_path())
 
 POLL_INTERVAL = 0.2
 
@@ -94,6 +95,10 @@ def start() -> int:
         raise DaemonAlreadyRunningError(pid)
 
     PID_PATH.parent.mkdir(parents=True, exist_ok=True)
+    # A stale sentinel left over from a previous stop's fallback path (e.g.
+    # the process died before cleanup) must not make a freshly-started
+    # daemon see a stop request and exit immediately.
+    STOP_SENTINEL_PATH.unlink(missing_ok=True)
     new_pid = _spawn()
     PID_PATH.write_text(str(new_pid))
     return new_pid
@@ -110,9 +115,22 @@ def stop(timeout: float = 10.0) -> bool:
     pid = _read_pid()
     if pid is None or not _is_process_alive(pid):
         PID_PATH.unlink(missing_ok=True)
+        STOP_SENTINEL_PATH.unlink(missing_ok=True)
         return False
 
-    _send_stop_signal(pid)
+    try:
+        _send_stop_signal(pid)
+    except OSError:
+        # Caller has no console attached (e.g. mintty/git-bash on Windows) -
+        # GenerateConsoleCtrlEvent needs one and fails with WinError 87
+        # before it ever reaches the target process (spec 033). Fall back
+        # to a sentinel file the daemon's own loop polls (~1s cadence,
+        # local_runtime.py) - portable, doesn't depend on the caller's
+        # console, and still lets the daemon drain gracefully (specs
+        # 026/027) instead of jumping straight to a force-kill.
+        STOP_SENTINEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+        STOP_SENTINEL_PATH.touch()
+
     deadline = time.monotonic() + timeout
     while _is_process_alive(pid) and time.monotonic() < deadline:
         time.sleep(POLL_INTERVAL)
@@ -120,4 +138,5 @@ def stop(timeout: float = 10.0) -> bool:
         _force_kill(pid)
 
     PID_PATH.unlink(missing_ok=True)
+    STOP_SENTINEL_PATH.unlink(missing_ok=True)
     return True

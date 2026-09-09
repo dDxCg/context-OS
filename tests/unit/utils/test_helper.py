@@ -9,6 +9,8 @@ from utils.helper import (
     get_config_path,
     get_db_url,
     get_schema_path,
+    get_stop_sentinel_path,
+    is_packaged_install,
     read_file,
     read_text_file,
     save_to_file,
@@ -279,6 +281,27 @@ def test_ac2_get_db_url_defaults_to_prod_db_in_a_packaged_install(monkeypatch, t
     monkeypatch.delenv("MODE", raising=False)
 
     assert get_db_url() == str(tmp_path / "data" / "db.sqlite")
+
+
+def test_ac3_is_packaged_install_is_false_for_a_source_checkout(monkeypatch, tmp_path):
+    (tmp_path / "pyproject.toml").write_text("")
+    monkeypatch.setattr(helper, "_EDITABLE_CANDIDATE", tmp_path)
+
+    assert is_packaged_install() is False
+
+
+def test_is_packaged_install_is_true_when_no_source_checkout_marker(monkeypatch, tmp_path):
+    no_marker_candidate = tmp_path / "site-packages" / "utils"
+    no_marker_candidate.mkdir(parents=True)
+    monkeypatch.setattr(helper, "_EDITABLE_CANDIDATE", no_marker_candidate)
+
+    assert is_packaged_install() is True
+
+
+def test_get_stop_sentinel_path_is_anchored_to_project_root(monkeypatch, tmp_path):
+    monkeypatch.setattr(helper, "PROJECT_ROOT", tmp_path)
+
+    assert get_stop_sentinel_path() == str(tmp_path / "data" / "ctx.stop")
 
 
 def test_ac3_get_db_url_explicit_mode_still_wins_in_a_packaged_install(monkeypatch, tmp_path):

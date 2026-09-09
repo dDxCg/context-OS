@@ -119,6 +119,21 @@ def get_config_path():
     # when the Config*Event dataclasses build their default src.
     return anchored(os.getenv("CONFIG_PATH") or "config.yaml")
 
+def is_packaged_install() -> bool:
+    """True for a real (non-editable) install, False for a source checkout
+    (spec 034) - public wrapper so callers outside this module (app.py's
+    PATH-notice check) don't need to reach into the underscored internals
+    already used for PROJECT_ROOT/MODE resolution (spec 029/031)."""
+    return not _is_source_checkout(_EDITABLE_CANDIDATE)
+
+
+def get_stop_sentinel_path():
+    """`ctx daemon stop`'s console-less fallback (spec 033) - written when
+    the CTRL_BREAK_EVENT/SIGTERM signal itself can't be delivered (e.g. no
+    console attached to the caller on Windows), polled by the daemon's own
+    main loop instead."""
+    return anchored("data/ctx.stop")
+
 def get_http_api_key():
     load_dotenv(PROJECT_ROOT / ".env")
     return os.getenv("HTTP_API_KEY") or None

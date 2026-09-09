@@ -1,9 +1,12 @@
+import shutil
+import sys
+from importlib.metadata import version as _package_version
 from pathlib import Path
 from typing import Annotated
 import typer
 
-from app.cli import daemon
-from utils.helper import get_db_url
+from app.cli import autostart, daemon
+from utils.helper import get_db_url, is_packaged_install
 from vcs.db.sqlite import DBHandler
 from vcs.services.configure import add_sources, remove_sources, health_check
 from vcs.services.audit import (
@@ -22,6 +25,47 @@ daemon_cli = typer.Typer()
 
 cli.add_typer(sources_cli, name="source")
 cli.add_typer(daemon_cli, name="daemon")
+
+
+def _print_version(value: bool):
+    if value:
+        typer.echo(_package_version("chrono-ctx"))
+        raise typer.Exit()
+
+
+def _path_not_found_hint(script_dir: Path, platform: str) -> str:
+    if platform == "win32":
+        return (
+            f"ctx is not on PATH. Add it for this user:\n"
+            f'  setx PATH "%PATH%;{script_dir}"\n'
+            f"(open a new shell afterward for this to take effect)"
+        )
+    return (
+        f"ctx is not on PATH. Add it (e.g. append to ~/.bashrc or ~/.zshrc "
+        f"to persist it):\n"
+        f'  export PATH="$PATH:{script_dir}"'
+    )
+
+
+def _warn_if_not_on_path():
+    # Source checkouts run via `uv run ctx`, which resolves correctly by
+    # construction - this check would just be noise for contributors.
+    if not is_packaged_install():
+        return
+    if shutil.which("ctx") is not None:
+        return
+    script_dir = Path(sys.argv[0]).resolve().parent
+    typer.echo(_path_not_found_hint(script_dir, sys.platform), err=True)
+
+
+@cli.callback()
+def main(
+    version: Annotated[
+        bool,
+        typer.Option("--version", "-V", is_eager=True, callback=_print_version, help="Show the installed version and exit."),
+    ] = False,
+):
+    _warn_if_not_on_path()
 
 #Path completion
 def complete_path(incomplete: str):
@@ -166,6 +210,24 @@ def daemon_status():
         typer.echo(f"running, pid {result['pid']}")
     else:
         typer.echo("stopped")
+
+@daemon_cli.command("enable")
+def daemon_enable():
+    try:
+        result = autostart.enable()
+    except (NotImplementedError, autostart.AutostartError) as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1)
+    typer.echo(result)
+
+@daemon_cli.command("disable")
+def daemon_disable():
+    try:
+        result = autostart.disable()
+    except (NotImplementedError, autostart.AutostartError) as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1)
+    typer.echo(result)
 
 
 if __name__ == "__main__":

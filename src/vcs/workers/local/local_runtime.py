@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from utils.helper import get_config_path
+from utils.helper import get_config_path, get_stop_sentinel_path
 from vcs.services.configure import derive_watch_targets, is_path_in_scope, parse_config
 from vcs.shared.types import CONFIG_EVENTS
 from vcs.workers.bus import LocalEventBus
@@ -16,6 +16,7 @@ class LocalRuntime:
     def __init__(self, sources, stop_event, watcher=None, bus=None):
         self.stop_event = stop_event
         self._scope_cache = None
+        self._stop_sentinel_path = Path(get_stop_sentinel_path())
 
         self.watcher = watcher if watcher else WatchWorker(self.stop_event)
         self.bus = bus if bus else LocalEventBus()
@@ -124,6 +125,11 @@ class LocalRuntime:
 
         try:
             while not self.stop_event.is_set():
+                if self._stop_sentinel_path.exists():
+                    # `ctx daemon stop`'s console-less fallback (spec 033) -
+                    # no signal was delivered, so nothing else sets stop_event.
+                    self.stop_event.set()
+                    break
                 self.stop_event.wait(timeout=1.0)
         except KeyboardInterrupt:
             self.stop()

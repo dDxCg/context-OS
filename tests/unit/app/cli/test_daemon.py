@@ -9,6 +9,7 @@ import app.cli.daemon as daemon
 def isolated_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(daemon, "PID_PATH", tmp_path / "ctx.pid")
     monkeypatch.setattr(daemon, "LOG_PATH", tmp_path / "ctx.log")
+    monkeypatch.setattr(daemon, "STOP_SENTINEL_PATH", tmp_path / "ctx.stop")
 
 
 def _write_pid(pid: int):
@@ -119,6 +120,51 @@ def test_ac2_spawn_does_not_use_detached_process_on_windows(monkeypatch):
     assert not flags & subprocess_module.DETACHED_PROCESS
     assert flags & subprocess_module.CREATE_NEW_PROCESS_GROUP
     assert captured["startupinfo"].wShowWindow == subprocess_module.SW_HIDE
+
+
+def test_ac1_stop_falls_back_to_sentinel_when_signal_raises_oserror(monkeypatch):
+    """spec 033: a console-less caller (git-bash/mintty) gets WinError 87 -
+    stop() must not propagate it, and must fall back to a sentinel file
+    instead of jumping straight to force-kill."""
+    _write_pid(111)
+    alive = {"value": True}
+    monkeypatch.setattr(daemon, "_is_process_alive", lambda pid: alive["value"])
+
+    def raising_signal(pid):
+        raise OSError("[WinError 87] The parameter is incorrect")
+    monkeypatch.setattr(daemon, "_send_stop_signal", raising_signal)
+    monkeypatch.setattr(daemon, "_force_kill", lambda pid: pytest.fail("should not escalate"))
+
+    def fake_sleep(_):
+        alive["value"] = False
+    monkeypatch.setattr(daemon.time, "sleep", fake_sleep)
+
+    stopped = daemon.stop(timeout=1.0)
+
+    assert stopped is True
+    assert daemon.STOP_SENTINEL_PATH.exists() is False  # cleaned up (AC-3)
+    assert not daemon.PID_PATH.exists()
+
+
+def test_ac3_stop_removes_sentinel_after_normal_signal_success(monkeypatch):
+    _write_pid(111)
+    alive = {"value": True}
+    monkeypatch.setattr(daemon, "_is_process_alive", lambda pid: alive["value"])
+    monkeypatch.setattr(daemon, "_send_stop_signal", lambda pid: alive.__setitem__("value", False))
+
+    daemon.stop(timeout=1.0)
+
+    assert daemon.STOP_SENTINEL_PATH.exists() is False
+
+
+def test_ac4_start_removes_a_stale_sentinel_before_spawning(monkeypatch):
+    daemon.STOP_SENTINEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    daemon.STOP_SENTINEL_PATH.write_text("")
+    monkeypatch.setattr(daemon, "_spawn", lambda: 4242)
+
+    daemon.start()
+
+    assert not daemon.STOP_SENTINEL_PATH.exists()
 
 
 def test_ec1_stop_escalates_after_timeout(monkeypatch):

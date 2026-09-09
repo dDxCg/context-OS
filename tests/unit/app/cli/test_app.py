@@ -230,3 +230,112 @@ def test_ec6_rollback_session_refuses_unknown_filesystem():
     result = runner.invoke(cli_app.cli, ["rollback-session", "unknown:filesystem"])
 
     assert result.exit_code != 0
+
+
+def test_ac1_version_flag_prints_installed_package_version():
+    from importlib.metadata import version
+
+    result = runner.invoke(cli_app.cli, ["--version"])
+
+    assert result.exit_code == 0
+    assert version("chrono-ctx") in result.stdout
+
+
+def test_ac2_version_flag_exits_before_requiring_a_subcommand():
+    result = runner.invoke(cli_app.cli, ["--version"])
+
+    assert result.exit_code == 0
+
+
+def test_ac3_no_flags_behaves_same_as_before_version_flag_added():
+    """Baseline, unmodified by this spec: no subcommand is a usage error
+    (exit 2) - adding --version must not change that."""
+    result = runner.invoke(cli_app.cli, [])
+
+    assert result.exit_code == 2
+
+
+def test_ac1_path_hint_windows_uses_setx():
+    """Path is host-OS-native (a PureWindowsPath renders with backslashes
+    regardless of test host) - mirrors what real code receives, since
+    sys.argv[0]'s resolved parent is always native to whatever platform is
+    actually running."""
+    from pathlib import PureWindowsPath
+
+    hint = cli_app._path_not_found_hint(PureWindowsPath("C:/Users/x/Scripts"), "win32")
+
+    assert "setx PATH" in hint
+    assert "C:\\Users\\x\\Scripts" in hint
+
+
+def test_ac4_path_hint_posix_uses_export():
+    from pathlib import PurePosixPath
+
+    hint = cli_app._path_not_found_hint(PurePosixPath("/home/x/.local/bin"), "linux")
+
+    assert 'export PATH="$PATH:/home/x/.local/bin"' in hint
+
+
+def test_ac1_notice_prints_to_stderr_when_packaged_and_not_on_path(monkeypatch):
+    monkeypatch.setattr(cli_app, "is_packaged_install", lambda: True)
+    monkeypatch.setattr(cli_app.shutil, "which", lambda name: None)
+
+    result = runner.invoke(cli_app.cli, ["rollback-session", "unknown:filesystem"])
+
+    assert "PATH" in result.output
+
+
+def test_ac2_no_notice_when_already_on_path(monkeypatch):
+    monkeypatch.setattr(cli_app, "is_packaged_install", lambda: True)
+    monkeypatch.setattr(cli_app.shutil, "which", lambda name: "/usr/local/bin/ctx")
+
+    result = runner.invoke(cli_app.cli, ["rollback-session", "unknown:filesystem"])
+
+    assert "PATH" not in result.output
+
+
+def test_ac3_no_notice_for_a_source_checkout(monkeypatch):
+    monkeypatch.setattr(cli_app, "is_packaged_install", lambda: False)
+    monkeypatch.setattr(cli_app.shutil, "which", lambda name: None)
+
+    result = runner.invoke(cli_app.cli, ["rollback-session", "unknown:filesystem"])
+
+    assert "PATH" not in result.output
+
+
+def test_ac5_daemon_enable_echoes_autostart_result(monkeypatch):
+    monkeypatch.setattr(cli_app.autostart, "enable", lambda: "wrote /some/path")
+
+    result = runner.invoke(cli_app.cli, ["daemon", "enable"])
+
+    assert result.exit_code == 0
+    assert "wrote /some/path" in result.output
+
+
+def test_ac5_daemon_disable_echoes_autostart_result(monkeypatch):
+    monkeypatch.setattr(cli_app.autostart, "disable", lambda: "removed /some/path")
+
+    result = runner.invoke(cli_app.cli, ["daemon", "disable"])
+
+    assert result.exit_code == 0
+    assert "removed /some/path" in result.output
+
+
+def test_ac6_daemon_enable_reports_notimplemented_as_error(monkeypatch):
+    def raise_not_implemented():
+        raise NotImplementedError("autostart is not supported on macOS yet")
+    monkeypatch.setattr(cli_app.autostart, "enable", raise_not_implemented)
+
+    result = runner.invoke(cli_app.cli, ["daemon", "enable"])
+
+    assert result.exit_code == 1
+    assert "macOS" in result.output
+
+
+def test_ac5_version_flag_does_not_print_path_notice(monkeypatch):
+    monkeypatch.setattr(cli_app, "is_packaged_install", lambda: True)
+    monkeypatch.setattr(cli_app.shutil, "which", lambda name: None)
+
+    result = runner.invoke(cli_app.cli, ["--version"])
+
+    assert "PATH" not in result.output
