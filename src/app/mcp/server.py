@@ -52,14 +52,17 @@ def _set_actor_hint(path: str, ctx: Context) -> None:
     """Best-effort: an MCP call must never fail because hint bookkeeping
     couldn't complete. If the DB/table isn't there yet (MCP started before
     the daemon ever applied schema.sql), this just no-ops - same as no
-    hint having been set at all."""
+    hint having been set at all. TypeError is caught alongside sqlite3.Error
+    because an unconfigured DATABASE_URL makes get_db_url() return None,
+    and sqlite3.connect(None, ...) raises TypeError, not a sqlite3.Error -
+    still bookkeeping failing to complete, not a reason to fail the write."""
     try:
         db_handler = DBHandler.from_url(get_db_url())
         try:
             set_hint(db_handler, path, f"agent:{ctx.session_id}")
         finally:
             db_handler.close()
-    except sqlite3.Error:
+    except (sqlite3.Error, TypeError):
         pass
 
 @mcp.tool()

@@ -40,8 +40,9 @@ def test_ac2_wrong_api_key_returns_401(client, monkeypatch):
     assert response.status_code == 401
 
 
-def test_ac3_correct_api_key_reaches_the_route(client, monkeypatch):
+def test_ac3_correct_api_key_reaches_the_route(client, monkeypatch, config_path):
     monkeypatch.setenv("HTTP_API_KEY", "correct-key")
+    config_path.write_text("sources: []\n")
 
     response = client.get("/v1/sources", headers={"X-API-Key": "correct-key"})
 

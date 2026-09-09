@@ -3,12 +3,13 @@
 Found during code review of the worker-abstraction refactor (`3630dc5`) plus the
 uncommitted fix-in-progress on top of it. Ranked most severe first.
 
-All logged issues are closed as of spec 017 (2026-09-09). Fixed: #1-#14
-(each with a regression test that's no longer `xfail`, except #9 — found
-and fixed via live-testing), #15/#19/#20/#16 (specs 014-017, Tier 3), and
-#21/#22 (fixed by the git-backend migration, `dec14a3`, but not
-cross-referenced back here until the same 2026-09-09 re-audit). Moot: #17,
-#18 — described a storage model the same migration replaced outright.
+All logged issues are closed. Fixed: #1-#14 (each with a regression test
+that's no longer `xfail`, except #9 — found and fixed via live-testing),
+#15/#19/#20/#16 (specs 014-017, Tier 3), #21/#22 (fixed by the git-backend
+migration, `dec14a3`, but not cross-referenced back here until a
+2026-09-09 re-audit), and #24 (test-hermeticity gaps found via a failing
+CI run, 2026-09-09). Moot: #17, #18 — described a storage model the git
+migration replaced outright.
 
 **#15-#20** were found while planning the config-control CLI and background
 daemon — see [STATE.md](STATE.md). They are a different class from
@@ -912,5 +913,41 @@ processes (same constraint spec 012 hit for the repo lock), and SQLite is the st
 already share. `LocalConsumer.handle` consumes the hint right before dispatching to
 `versioning.py`. CLI actor capture stays out of scope — no CLI command currently writes content
 through the watcher path (`ctx rollback` attributes its own commit directly via `git_store`).
+
+## 24. ~~Two test hermeticity gaps masked by real local dev files, broke CI~~ — FIXED
+
+**Files:** `tests/unit/app/api/test_auth.py`, `src/app/mcp/server.py` (`_set_actor_hint`)
+
+Found via `gh run view` on CI run `34274047251` (push of `0b45899`, spec 019) — 7 tests
+failed uniformly across the whole Python matrix (3.10-3.14), `ruff` clean. Both root causes
+are the same class of bug this project has hit before (issues #11/#21's "unit tests mock
+the watcher" and the CI-fix commit `f8b073e`'s path bugs): a real, gitignored local file
+made a test pass locally that fails on a clean checkout.
+
+1. **`test_auth.py::test_ac3_correct_api_key_reaches_the_route`** — `FileNotFoundError:
+   .../config.yaml`. The route it exercises (`GET /v1/sources`) calls through to
+   `derive_watch_targets()` → `parse_config()`, which opens `CONFIG_PATH` directly. The
+   test never isolated `CONFIG_PATH` (no `config_path` fixture, unlike
+   `test_vcs_router.py`'s equivalent test), so it silently read the real repo-root
+   `config.yaml` — present on every dev machine that's ever run the app, absent on a CI
+   runner's clean checkout.
+2. **Five `test_guardrail.py` tests** (`write_file`/`create_file`/`delete_file`/
+   `move_file`) — `TypeError: expected str, bytes or os.PathLike object, not NoneType`,
+   raised from `sqlite3.connect(None, ...)` inside `DBHandler.from_url`. `_set_actor_hint`'s
+   docstring states the contract plainly: "an MCP call must never fail because hint
+   bookkeeping couldn't complete" — but its `except sqlite3.Error` didn't cover this.
+   `get_db_url()` returns `None` when `DATABASE_URL` is unset anywhere (no default, per
+   `README.md`'s env table), which is exactly a CI runner's state with no `.env.dev`. Every
+   dev machine's `.env.dev` (real, gitignored, always sets `DATABASE_URL`) masked this on
+   every local run, including every gate this session ran before pushing.
+
+**Fix:** `test_auth.py`'s `test_ac3` now uses the `config_path` fixture and writes a
+minimal `sources: []` config, matching the isolation pattern already used everywhere else
+in this test suite. `_set_actor_hint` now catches `(sqlite3.Error, TypeError)` — the
+bookkeeping is still best-effort, matching its own stated contract; it just wasn't broad
+enough to actually deliver on it. Verified by temporarily moving `config.yaml`/`.env`/
+`.env.dev` aside and re-running the full suite locally (290 passed) before restoring them —
+the same technique used to verify the earlier CI path-bug fix, since this machine has no
+CI-identical environment to test against directly.
 
 ---

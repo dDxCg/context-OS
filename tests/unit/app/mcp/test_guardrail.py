@@ -131,6 +131,28 @@ async def test_ac6_write_file_sets_a_pending_actor_hint(source_dir, db_path):
 
 
 @pytest.mark.anyio
+async def test_write_file_succeeds_when_database_url_is_unconfigured(source_dir, monkeypatch):
+    """Regression: _set_actor_hint's best-effort contract ("an MCP call must
+    never fail because hint bookkeeping couldn't complete") only caught
+    sqlite3.Error. get_db_url() returning None (DATABASE_URL unset - the
+    real state of a CI runner with no .env.dev) makes DBHandler.from_url()
+    raise TypeError from sqlite3.connect(None, ...), which escaped uncaught
+    and failed the whole write. CI caught this; local runs never did,
+    because a real .env.dev always supplied DATABASE_URL."""
+    monkeypatch.setattr(server, "get_db_url", lambda: None)
+    target = source_dir / "doc.txt"
+    target.write_text("old content")
+
+    async with Client(server.mcp, elicitation_handler=_fail_if_called) as client:
+        result = await client.call_tool(
+            "write_file", {"path": str(target), "content": "new content"}
+        )
+
+    assert result.data == {"status": "ok"}
+    assert target.read_text() == "new content"
+
+
+@pytest.mark.anyio
 async def test_ac2_write_file_with_matching_expected_version_succeeds(source_dir):
     target = source_dir / "doc.txt"
     target.write_text("old content")
