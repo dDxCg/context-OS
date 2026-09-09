@@ -41,3 +41,9 @@ def test_ac4_source_path_equals_watch_target_itself():
 def test_ec1_source_path_not_under_any_watch_target_raises():
     with pytest.raises(mirror_path.PathNotWatchedError):
         mirror_path.resolve_mirror_location("C:/elsewhere/x.txt", ["C:/src"])
+
+
+def test_repo_path_for_matches_resolve_mirror_location():
+    expected, _ = mirror_path.resolve_mirror_location("C:/src", ["C:/src"])
+
+    assert mirror_path.repo_path_for("C:/src") == expected

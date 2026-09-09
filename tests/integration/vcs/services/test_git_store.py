@@ -400,6 +400,48 @@ def test_ac2_lock_for_serializes_across_separate_lock_instances(initialized_repo
     lock2.release()
 
 
+def test_ac1_commits_by_author_returns_matching_commits_oldest_first(initialized_repo):
+    r1 = git_store.write(
+        initialized_repo, "a.txt", b"v1",
+        message="add a.txt", author="agent:s1 <agent@chrono-ctx.local>",
+    )
+    r2 = git_store.write(
+        initialized_repo, "b.txt", b"v1",
+        message="add b.txt", author="agent:s1 <agent@chrono-ctx.local>",
+    )
+
+    commits = git_store.commits_by_author(initialized_repo, "agent:s1")
+
+    assert [c["rev"] for c in commits] == [r1, r2]
+    assert commits[0]["parent"] is None
+    assert commits[0]["paths"] == ["a.txt"]
+    assert commits[1]["parent"] == r1
+    assert commits[1]["paths"] == ["b.txt"]
+    assert commits[0]["timestamp"]
+
+
+def test_ac2_commits_by_author_excludes_other_authors(initialized_repo):
+    git_store.write(
+        initialized_repo, "a.txt", b"v1",
+        message="add a.txt", author="agent:s1 <agent@chrono-ctx.local>",
+    )
+    git_store.write(
+        initialized_repo, "b.txt", b"v1",
+        message="add b.txt", author="Someone Else <else@chrono-ctx.local>",
+    )
+
+    commits = git_store.commits_by_author(initialized_repo, "agent:s1")
+
+    assert len(commits) == 1
+    assert commits[0]["paths"] == ["a.txt"]
+
+
+def test_commits_by_author_empty_for_unborn_head(repo_path):
+    git_store.init_repo(repo_path)
+
+    assert git_store.commits_by_author(repo_path, "agent:s1") == []
+
+
 def test_ac3_diff_shows_unified_diff_between_two_revs(initialized_repo):
     first_rev = git_store.write(
         initialized_repo, "a.txt", b"line one\n",

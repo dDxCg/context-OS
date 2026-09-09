@@ -22,6 +22,14 @@ def repo_dir_name(watch_target: str) -> str:
     return normalized.replace(":", "").lstrip("/")
 
 
+def repo_path_for(watch_target: str) -> Path:
+    """Mirror repo path for one watch target, independent of any source
+    path under it - the same computation resolve_mirror_location() does
+    internally per candidate target, exposed for callers that enumerate
+    mirror repos by watch target instead of resolving one source path."""
+    return GIT_REPO_DIR / repo_dir_name(path_normalize(watch_target))
+
+
 def resolve_mirror_location(source_path: str, watch_targets: list[str]) -> tuple[Path, str]:
     """(repo_path under GIT_REPO_DIR, relpath within that repo) for
     source_path, given the current set of watch-target directories."""

@@ -49,7 +49,7 @@ actor attribution, quyết định thiết kế) → [`ARCHITECTURE.md`](ARCHITE
 | Config hot-reload | Thêm/xoá nguồn qua `config.yaml` không cần restart daemon | Đang phát triển |
 | MCP tool server | 5 tool (`read/write/create/delete/move_file`) + guardrail thật (elicitation, fail-closed); edit qua MCP đã gắn actor thật qua pending hint watcher nhặt lại | Xong |
 | HTTP API | 3 route read-only (`/v1/sources`, `/history`, `/diff`), fail-closed 403, auth `X-API-Key` (1 key chung, chưa per-caller scope) | Xong |
-| CLI | `source list/add/remove`, `history`, `diff`, `rollback` dùng git rev string xuyên suốt | Xong |
+| CLI | `source list/add/remove`, `history`, `diff`, `rollback`, `rollback-session` (undo mọi thứ 1 actor đã làm, qua mọi watch target) | Xong |
 | `ctx daemon` | Chạy nền watch daemon: detached process + PID file, dừng graceful cross-platform (`SIGTERM`/`CTRL_BREAK_EVENT`), `start/stop/status` | Xong |
 
 ## Tech Stack

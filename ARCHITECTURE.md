@@ -78,7 +78,7 @@ graph TB
     CLI["CLI (ctx, ephemeral process)"]
 
     Versioning["vcs/services/versioning.py\n(event handlers)"]
-    Audit["vcs/services/audit.py\n(read-only queries)"]
+    Audit["vcs/services/audit.py\n(history/diff reads + CLI-only rollback writes)"]
     GitStore["vcs/services/git_store.py\n(git subprocess primitives)"]
     MirrorPath["vcs/services/mirror_path.py\n(path mapping)"]
 
@@ -365,7 +365,7 @@ src/
 │   │   ├── versioning.py     # event handlers: created/modified/deleted/moved
 │   │   ├── git_store.py      # git subprocess primitives, per-repo lock
 │   │   ├── mirror_path.py    # source path → (repo_path, relpath)
-│   │   ├── audit.py          # queries + rollback_source over the git backend
+│   │   ├── audit.py          # queries + rollback_source/rollback_session over the git backend
 │   │   ├── actor_hints.py    # cross-process pending-actor handoff (spec 013)
 │   │   └── db.py             # schema init
 │   └── workers/

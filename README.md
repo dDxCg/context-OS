@@ -51,7 +51,7 @@ actor attribution, design decisions) → [`ARCHITECTURE.md`](ARCHITECTURE.md).
 | Config hot-reload | Add/remove sources via `config.yaml` without restarting the daemon | In progress |
 | MCP tool server | 5 tools (`read/write/create/delete/move_file`) with a real guardrail (elicitation, fail-closed); MCP-triggered edits are actor-attributed via a pending hint the watcher picks up | Done |
 | HTTP API | 3 read-only routes (`/v1/sources`, `/history`, `/diff`), fail-closed 403, `X-API-Key` auth (single shared key, no per-caller scopes yet) | Done |
-| CLI | `source list/add/remove`, `history`, `diff`, `rollback` use git-rev strings throughout | Done |
+| CLI | `source list/add/remove`, `history`, `diff`, `rollback`, `rollback-session` (undo everything one actor did, across every watch target) | Done |
 | `ctx daemon` | Backgrounds the watch daemon: detached process + PID file, cross-platform graceful stop (`SIGTERM`/`CTRL_BREAK_EVENT`), `start/stop/status` | Done |
 
 ## Tech Stack

@@ -7,10 +7,12 @@ from utils.helper import get_db_url
 from vcs.db.sqlite import DBHandler
 from vcs.services.configure import add_sources, remove_sources, health_check
 from vcs.services.audit import (
+    InvalidSessionActorError,
     OutOfScopeError,
     check_diff,
     get_sources,
     get_version_list,
+    rollback_session,
     rollback_source,
 )
 
@@ -89,6 +91,26 @@ def rollback(
         typer.echo(f"{path}: out of scope", err=True)
         raise typer.Exit(code=1)
     typer.echo(f"rolled back {path} to {version}, new version {new_rev}")
+
+@cli.command("rollback-session")
+def rollback_session_cmd(
+    actor_label: Annotated[
+        str,
+        typer.Argument(help="Actor label from ctx history's author column, e.g. agent:<session_id>"),
+    ],
+):
+    try:
+        result = rollback_session(actor_label)
+    except InvalidSessionActorError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1)
+
+    for path in result["rolled_back"]:
+        typer.echo(f"rolled back: {path}")
+    for failure in result["failed"]:
+        typer.echo(f"failed: {failure['path']}: {failure['error']}", err=True)
+    if result["failed"]:
+        raise typer.Exit(code=1)
 
 @cli.command("diff")
 def show_diff(

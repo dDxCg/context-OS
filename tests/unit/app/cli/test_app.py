@@ -207,3 +207,26 @@ def test_ec5_rollback_out_of_scope_exits_nonzero(config_path, tmp_path):
     result = runner.invoke(cli_app.cli, ["rollback", str(outside), "--version", "aaa"])
 
     assert result.exit_code != 0
+
+
+def test_ac7_rollback_session_restores_and_reports_each_path(config_path, tmp_path):
+    source_dir = _source_dir(config_path, tmp_path)
+    tracked = source_dir / "doc.txt"
+    watch_targets = [str(source_dir)]
+    repo_path, relpath = mirror_path.resolve_mirror_location(str(tracked), watch_targets)
+    git_store.init_repo(repo_path)
+    git_store.write(repo_path, relpath, b"v0", message="add", author="human:alice <human@chrono-ctx.local>")
+    git_store.write(repo_path, relpath, b"v1", message="session", author="agent:s1 <agent@chrono-ctx.local>")
+    tracked.write_bytes(b"v1")
+
+    result = runner.invoke(cli_app.cli, ["rollback-session", "agent:s1"])
+
+    assert result.exit_code == 0
+    assert relpath in result.stdout
+    assert tracked.read_bytes() == b"v0"
+
+
+def test_ec6_rollback_session_refuses_unknown_filesystem():
+    result = runner.invoke(cli_app.cli, ["rollback-session", "unknown:filesystem"])
+
+    assert result.exit_code != 0

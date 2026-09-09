@@ -247,6 +247,37 @@ def show(repo_path: Path, relpath: str, rev: str) -> bytes:
     return result.stdout
 
 
+def commits_by_author(repo_path: Path, author_name: str) -> list[dict]:
+    """Every commit in repo_path whose author *name* (the part before the
+    email, i.e. write()'s actor label) exactly matches author_name, oldest
+    first: [{"rev", "parent", "timestamp", "paths"}, ...]. `parent` is None
+    for a root commit. One `git show` per matching commit to get its paths
+    unambiguously - safer than parsing --name-only interleaved with a
+    custom format line, since a path can contain "|"."""
+    _require_initialized(repo_path)
+    result = subprocess.run(
+        ["git", "log", "--reverse", "--format=%H|%P|%an|%aI"],
+        cwd=str(repo_path), capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return []
+    commits = []
+    for line in result.stdout.strip().splitlines():
+        if not line:
+            continue
+        rev, parents, author, timestamp = line.split("|", 3)
+        if author != author_name:
+            continue
+        parent = parents.split()[0] if parents else None
+        paths_result = subprocess.run(
+            ["git", "show", "--format=", "--name-only", rev],
+            cwd=str(repo_path), check=True, capture_output=True, text=True,
+        )
+        paths = [p for p in paths_result.stdout.strip().splitlines() if p]
+        commits.append({"rev": rev, "parent": parent, "timestamp": timestamp, "paths": paths})
+    return commits
+
+
 def write_with_check(
     repo_path: Path, relpath: str, content: bytes, message: str, author: str,
     expected_rev: str | None = None, force: bool = False,

@@ -4,21 +4,26 @@ Consolidated 2026-09-09 from the retired plan docs (see [STATE.md](STATE.md)) pl
 `ARCHITECTURE.md` §8's Tier-3-era gap list. Nothing here has a spec yet — a spec gets
 written only once someone is about to implement it (`AGENTS.md`'s rule).
 
-## 1. Multi-file / session-scoped atomic rollback — biggest gap
+## 1. ~~Multi-file / session-scoped atomic rollback~~ — done (spec 020)
 
-`ctx rollback <file> -v N` is per-file only. An agent session realistically touches
-several context files per run; there's no way to undo "everything session/config-diff X
-did" as one unit — the gap Claude Code's own `/rewind` (atomic across every file touched
-since a checkpoint) highlights by comparison. Needs a run/session id threaded through
-ingestion so a batch, not just one file, can be a rollback target. Design this into
-`audit.py` alongside whatever triggers it, not bolted on after — retrofitting a session id
-onto an already-shipped per-file model is more painful later.
+`ctx rollback-session <actor_label>` (spec 020) closes this: undoes everything one actor
+did across every watch target, restoring each touched path to its state immediately before
+that actor's earliest commit on it (deletes a path the actor created). Reuses the actor
+identity spec 013 already writes into every MCP-triggered commit (`agent:{session_id}`) —
+no new session concept needed, just a query and a batch restore on top of it. Best-effort,
+not atomic across repos (no cross-repo transaction exists); each path is individually
+guarded by the optimistic-concurrency gate from item 2 below, so a real edit by someone
+else after the session is refused for that one path rather than silently discarded.
+`"unknown:filesystem"` (the generic untracked-edit fallback) is refused as a session id —
+too broad to be "one session." See
+[020-rollback-session.md](../specs/020-rollback-session.md).
 
-## 2. Optimistic-concurrency gate beyond `rollback`
+## 2. Optimistic-concurrency gate beyond `rollback` — partially done
 
-`git_store.write_with_check(expected_rev=...)` (spec 012) exists but is wired into exactly
-one caller: `rollback_source`. MCP write tools (`write_file`/`create_file`/...) and general
-CLI writes still do plain filesystem I/O with no expected-revision check — two concurrent
+`git_store.write_with_check(expected_rev=...)` (spec 012) is now wired into two callers:
+`rollback_source` and `rollback_session` (spec 020). MCP write tools (`write_file`/
+`create_file`/...) and general CLI writes still do plain filesystem I/O with no
+expected-revision check — two concurrent
 writers to the same path (two agent sessions, or MCP racing a human edit) is a silent
 lost-update, not a detected conflict. This was flagged early as "conflict-ux" — turned out
 to need no conflict-marker translation layer (the single-writer lock means there's
