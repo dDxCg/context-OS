@@ -68,15 +68,46 @@ actor attribution, design decisions) → [`ARCHITECTURE.md`](ARCHITECTURE.md).
 Per-module detail (data model, concurrency, actor attribution) →
 [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
-## Quick start
+## Install
 
 ```bash
-git clone https://github.com/dDxCg/chrono-ctx.git && cd chrono-ctx
-uv sync                          # or: pip install -e ".[dev]"
-cp config.example.yaml config.yaml   # declare the sources to watch
+pipx install chrono-ctx    # recommended - isolated venv, adds ctx to PATH automatically
+```
+
+```bash
+pip install chrono-ctx     # also works, but ctx may land outside PATH -
+                            # pip will warn if so; ctx itself also warns on
+                            # every run until it's fixed
+```
+
+```bash
+# no install - runs in a cached ephemeral venv. The entry point is `ctx`,
+# not `chrono-ctx`, so --from is required (uvx says so if you omit it):
+uvx --from chrono-ctx ctx --version
+uvx --from chrono-ctx ctx daemon start
+```
+
+If `pip`/`ctx` warns `ctx` isn't on PATH, add the printed directory to PATH:
+
+```powershell
+# Windows (PowerShell) - opens a new shell for it to take effect
+setx PATH "%PATH%;<dir from the warning>"
+```
+
+```bash
+# Linux/macOS - add to ~/.bashrc or ~/.zshrc to persist across shells
+export PATH="$PATH:<dir from the warning>"
 ```
 
 Requires `git` on PATH (the storage backend shells out to `git`).
+
+## Quick start (from source, for contributing)
+
+```bash
+git clone https://github.com/dDxCg/chrono-ctx.git && cd chrono-ctx
+uv sync --extra dev              # or: pip install -e ".[dev]"
+cp config.example.yaml config.yaml   # declare the sources to watch
+```
 
 ```bash
 ctx daemon start                  # watch + versioning, backgrounded (PID: data/ctx.pid, log: data/ctx.log)

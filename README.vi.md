@@ -66,15 +66,46 @@ actor attribution, quyết định thiết kế) → [`ARCHITECTURE.md`](ARCHITE
 Chi tiết từng module (data model, concurrency, actor attribution) →
 [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
-## Bắt đầu nhanh
+## Cài đặt
 
 ```bash
-git clone https://github.com/dDxCg/chrono-ctx.git && cd chrono-ctx
-uv sync                          # hoặc: pip install -e ".[dev]"
-cp config.example.yaml config.yaml   # khai báo nguồn cần theo dõi
+pipx install chrono-ctx    # khuyến nghị - venv riêng biệt, tự thêm ctx vào PATH
+```
+
+```bash
+pip install chrono-ctx     # cũng chạy được, nhưng ctx có thể nằm ngoài PATH -
+                            # pip sẽ cảnh báo nếu vậy, ctx cũng tự cảnh báo mỗi
+                            # lần chạy cho tới khi được sửa
+```
+
+```bash
+# không cần cài - chạy trong venv ephemeral có cache. Entry point tên `ctx`,
+# không phải `chrono-ctx`, nên cần --from (uvx tự báo nếu quên):
+uvx --from chrono-ctx ctx --version
+uvx --from chrono-ctx ctx daemon start
+```
+
+Nếu `pip`/`ctx` cảnh báo `ctx` chưa có trên PATH, thêm thư mục được in ra vào PATH:
+
+```powershell
+# Windows (PowerShell) - cần mở shell mới để có hiệu lực
+setx PATH "%PATH%;<thư mục trong cảnh báo>"
+```
+
+```bash
+# Linux/macOS - thêm vào ~/.bashrc hoặc ~/.zshrc để giữ lại qua các phiên
+export PATH="$PATH:<thư mục trong cảnh báo>"
 ```
 
 Cần `git` trên PATH (storage backend shell ra `git` qua subprocess).
+
+## Bắt đầu nhanh (từ source, để đóng góp)
+
+```bash
+git clone https://github.com/dDxCg/chrono-ctx.git && cd chrono-ctx
+uv sync --extra dev              # hoặc: pip install -e ".[dev]"
+cp config.example.yaml config.yaml   # khai báo nguồn cần theo dõi
+```
 
 ```bash
 ctx daemon start                  # watch + versioning, chạy nền (PID: data/ctx.pid, log: data/ctx.log)
