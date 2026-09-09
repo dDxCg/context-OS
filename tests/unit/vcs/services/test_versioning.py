@@ -6,11 +6,13 @@ import vcs.services.mirror_path as mirror_path
 from vcs.services.git_store import head_rev, path_exists_at_rev, show
 from vcs.services.versioning import (
     _resolve_actor,
+    active_locations,
     created_handle,
     current_version,
     deleted_handle,
     modified_handle,
     moved_handle,
+    reconcile_dropped_sources,
     sync_source_status,
 )
 from vcs.shared.temp_file import TempFile
@@ -534,3 +536,74 @@ def test_sync_source_status_deactivates_missing_and_reactivates_present(db_handl
     rows = dict(db_handler.execute(Query("SELECT context_id, status FROM locations"), commit=False))
     assert rows["ctx-kept"] == 1
     assert rows["ctx-gone"] == 0
+
+
+def test_ac1_reconcile_dropped_sources_removes_mirror_content_for_dropped_location(db_handler, tmp_path):
+    dropped_file = tmp_path / "dropped.txt"
+    dropped_file.write_text("bye")
+    created_handle(db_handler, CreatedEvent(src=str(dropped_file)), watch_targets=[str(tmp_path)])
+
+    reconcile_dropped_sources(db_handler, [str(dropped_file)], [str(tmp_path)])
+
+    repo_path, relpath = mirror_path.resolve_mirror_location(str(dropped_file), [str(tmp_path)])
+    assert path_exists_at_rev(repo_path, relpath, "HEAD") is False
+
+
+def test_ac2_reconcile_dropped_sources_uses_startup_reconcile_actor(db_handler, tmp_path):
+    from vcs.services.git_store import commit_info
+
+    dropped_file = tmp_path / "dropped.txt"
+    dropped_file.write_text("bye")
+    created_handle(db_handler, CreatedEvent(src=str(dropped_file)), watch_targets=[str(tmp_path)])
+
+    reconcile_dropped_sources(db_handler, [str(dropped_file)], [str(tmp_path)])
+
+    repo_path, relpath = mirror_path.resolve_mirror_location(str(dropped_file), [str(tmp_path)])
+    author = commit_info(repo_path, relpath).author
+    assert "unknown:filesystem" not in author
+    assert "startup:scan" not in author
+    assert "startup:reconcile" in author
+
+
+def test_ac4_reconcile_dropped_sources_noop_when_nothing_committed_yet(db_handler, tmp_path):
+    never_committed = tmp_path / "never.txt"
+    never_committed.write_text("hi")
+
+    # No error, no commit created - the location was never actually written
+    # to its mirror (e.g. tracked in the DB some other way), so there is
+    # nothing for git_store.remove() to remove.
+    reconcile_dropped_sources(db_handler, [str(never_committed)], [str(tmp_path)])
+
+    repo_path, relpath = mirror_path.resolve_mirror_location(str(never_committed), [str(tmp_path)])
+    assert head_rev(repo_path, relpath) is None
+
+
+def test_ec1_reconcile_dropped_sources_skips_location_whose_watch_target_no_longer_resolves(db_handler, tmp_path):
+    dropped_file = tmp_path / "dropped.txt"
+    dropped_file.write_text("bye")
+    created_handle(db_handler, CreatedEvent(src=str(dropped_file)), watch_targets=[str(tmp_path)])
+
+    # old_watch_targets no longer covers dropped_file at all (its whole
+    # directory is gone from that list) - must skip, not raise.
+    reconcile_dropped_sources(db_handler, [str(dropped_file)], [str(tmp_path / "unrelated")])
+
+
+def test_active_locations_returns_only_status_one_rows(db_handler, tmp_path):
+    active_file = tmp_path / "active.txt"
+    active_file.write_text("active")
+
+    _insert_context(db_handler, "ctx-active")
+    _insert_location(db_handler, active_file, "ctx-active")
+
+    _insert_context(db_handler, "ctx-inactive")
+    db_handler.execute(Query(
+        """
+        INSERT INTO locations (st_ino, st_dev, location, context_id, status)
+        VALUES ('111', '111', ?, ?, 0)
+        """,
+        ("inactive/path", "ctx-inactive"),
+    ))
+
+    result = active_locations(db_handler)
+
+    assert result == [str(tmp_path / "active.txt")]

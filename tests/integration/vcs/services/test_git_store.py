@@ -596,3 +596,123 @@ def test_ac3_diff_shows_unified_diff_between_two_revs(initialized_repo):
 
     assert "-line one" in text
     assert "+line two" in text
+
+
+def _stage_without_committing(repo_path, relpath, content):
+    """Simulates a force-kill landing between update-index and commit-tree:
+    the index gets a staged entry, but no commit/HEAD-move ever follows."""
+    blob = subprocess.run(
+        ["git", "hash-object", "-w", "--stdin"],
+        cwd=str(repo_path), input=content, check=True, capture_output=True,
+    ).stdout.decode().strip()
+    subprocess.run(
+        ["git", "update-index", "--add", "--cacheinfo", f"100644,{blob},{relpath}"],
+        cwd=str(repo_path), check=True, capture_output=True,
+    )
+
+
+def _tree_paths(repo_path, rev):
+    result = subprocess.run(
+        ["git", "ls-tree", "-r", "--name-only", rev],
+        cwd=str(repo_path), check=True, capture_output=True, text=True,
+    )
+    return set(result.stdout.strip().splitlines())
+
+
+def test_ac1_reset_stale_index_discards_uncommitted_staged_entry(initialized_repo):
+    git_store.write(
+        initialized_repo, "a.txt", b"hello",
+        message="add a.txt", author="Test Author <test@chrono-ctx.local>",
+    )
+    _stage_without_committing(initialized_repo, "stale.txt", b"crash leftover")
+
+    git_store.reset_stale_index(initialized_repo)
+
+    new_rev = git_store.write(
+        initialized_repo, "b.txt", b"world",
+        message="add b.txt", author="Test Author <test@chrono-ctx.local>",
+    )
+    assert _tree_paths(initialized_repo, new_rev) == {"a.txt", "b.txt"}
+
+
+def test_ac2_reset_stale_index_is_a_noop_when_index_already_matches_head(initialized_repo):
+    rev = git_store.write(
+        initialized_repo, "a.txt", b"hello",
+        message="add a.txt", author="Test Author <test@chrono-ctx.local>",
+    )
+
+    git_store.reset_stale_index(initialized_repo)
+
+    assert git_store.head_rev(initialized_repo, "a.txt") == rev
+    log = subprocess.run(
+        ["git", "-C", str(initialized_repo), "log", "--format=%H"],
+        capture_output=True, text=True, check=True,
+    )
+    assert len(log.stdout.strip().splitlines()) == 1
+
+
+def test_ac3_reset_stale_index_discards_staged_entry_on_unborn_head(initialized_repo):
+    _stage_without_committing(initialized_repo, "stale.txt", b"crash leftover")
+
+    git_store.reset_stale_index(initialized_repo)
+
+    new_rev = git_store.write(
+        initialized_repo, "a.txt", b"hello",
+        message="add a.txt", author="Test Author <test@chrono-ctx.local>",
+    )
+    assert _tree_paths(initialized_repo, new_rev) == {"a.txt"}
+
+
+def test_ac4_existing_mirror_repos_finds_a_deeply_nested_repo(tmp_path):
+    nested = tmp_path / "base" / "C" / "Users" / "x" / "project"
+    git_store.init_repo(nested)
+
+    found = git_store.existing_mirror_repos(tmp_path / "base")
+
+    assert nested.resolve() in [p.resolve() for p in found]
+
+
+def test_ac5_existing_mirror_repos_does_not_descend_into_a_found_repos_internals(tmp_path):
+    base = tmp_path / "base"
+    repo = base / "project"
+    git_store.init_repo(repo)
+    git_store.write(
+        repo, "a.txt", b"hello",
+        message="add a.txt", author="Test Author <test@chrono-ctx.local>",
+    )
+
+    found = git_store.existing_mirror_repos(base)
+
+    resolved = [p.resolve() for p in found]
+    assert repo.resolve() in resolved
+    assert (repo / "objects").resolve() not in resolved
+    assert len(resolved) == 1
+
+
+def test_ec1_existing_mirror_repos_returns_empty_list_when_base_dir_missing(tmp_path):
+    missing = tmp_path / "never-created"
+
+    assert git_store.existing_mirror_repos(missing) == []
+
+
+def test_reset_stale_indexes_resets_every_repo_under_base_dir(tmp_path):
+    base = tmp_path / "base"
+    repo_a = base / "a"
+    repo_b = base / "b"
+    git_store.init_repo(repo_a)
+    git_store.init_repo(repo_b)
+    git_store.write(
+        repo_a, "a.txt", b"hello",
+        message="add a.txt", author="Test Author <test@chrono-ctx.local>",
+    )
+    _stage_without_committing(repo_a, "stale.txt", b"crash leftover")
+    _stage_without_committing(repo_b, "stale.txt", b"crash leftover")
+
+    touched = git_store.reset_stale_indexes(base)
+
+    assert {p.resolve() for p in touched} == {repo_a.resolve(), repo_b.resolve()}
+    new_rev = git_store.write(
+        repo_a, "b.txt", b"world",
+        message="add b.txt", author="Test Author <test@chrono-ctx.local>",
+    )
+    assert _tree_paths(repo_a, new_rev) == {"a.txt", "b.txt"}

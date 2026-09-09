@@ -20,6 +20,14 @@ def _resolve_actor(event) -> tuple[str, str]:
     return actor, f"{actor} <{name}@chrono-ctx.local>"
 
 
+# Distinct from local_adapter.py's STARTUP_ACTOR_LABEL ("startup:scan",
+# a fresh backfill) - this one specifically means "removed from config.yaml
+# while the daemon was offline," found by Initializer.init() reconciling
+# against the previous config snapshot (see docs/specs/026).
+STARTUP_RECONCILE_ACTOR_LABEL = "startup:reconcile"
+STARTUP_RECONCILE_AUTHOR = f"{STARTUP_RECONCILE_ACTOR_LABEL} <startup@chrono-ctx.local>"
+
+
 @log_enabled
 def _append_context(db_handler: DBHandler, context_entry: ContextEntry, watch_targets: list[str], actor_label: str, author: str):
     location = context_entry.location
@@ -205,6 +213,45 @@ def current_version(path: str, watch_targets: list[str] | None = None) -> str | 
         return None
     git_store.init_repo(repo_path)
     return git_store.head_rev(repo_path, relpath)
+
+
+@log_enabled
+def active_locations(db_handler: DBHandler) -> list[str]:
+    """Locations currently marked in scope (status = 1)."""
+    query = Query(query="SELECT location FROM locations WHERE status = 1")
+    rows = db_handler.execute(commit=False, query=query)
+    return [row[0] for row in rows]
+
+
+@log_enabled
+def reconcile_dropped_sources(
+    db_handler: DBHandler,
+    dropped_locations: list[str],
+    old_watch_targets: list[str],
+) -> None:
+    """git_store.remove() every location that left scope while the daemon
+    was offline, so the mirror's HEAD stops silently disagreeing with
+    locations.status - the same outcome deleted_handle() gives a removal
+    made while the daemon is running (docs/specs/026).
+
+    old_watch_targets must be derived from the *previous* config snapshot,
+    not the current one - the whole point is resolving mirror paths that
+    the current config no longer covers. A location whose watch target no
+    longer resolves (its directory is also gone from disk, not just
+    dropped from config.yaml) is skipped, not raised - see EC-1.
+    """
+    for location in dropped_locations:
+        try:
+            repo_path, relpath = resolve_mirror_location(location, old_watch_targets)
+        except PathNotWatchedError:
+            continue
+
+        git_store.init_repo(repo_path)
+        git_store.remove(
+            repo_path, relpath,
+            message=f"left scope (dropped while offline): {relpath}",
+            author=STARTUP_RECONCILE_AUTHOR,
+        )
 
 
 @log_enabled

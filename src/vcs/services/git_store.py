@@ -301,6 +301,58 @@ def move(repo_path: Path, src_relpath: str, dst_relpath: str, message: str, auth
         return new_rev
 
 
+def reset_stale_index(repo_path: Path) -> None:
+    """Discard any index entry left staged-but-never-committed by a
+    force-killed write()/remove()/move() (spec 025's plumbing runs several
+    separate git calls under one lock - a kill between the index stage and
+    the final commit leaves the index disagreeing with HEAD). Safe
+    unconditionally, not a heuristic: the lock this acquires is held for
+    the *entire* stage-through-commit sequence of every real write, so if
+    it's free, no write is legitimately in progress - any index entry that
+    doesn't match HEAD's tree can only be crash leftover (spec 027)."""
+    _require_initialized(repo_path)
+    with _lock_for(repo_path):
+        head = _rev_parse_or_none(repo_path, "HEAD")
+        if head is not None:
+            subprocess.run(
+                ["git", "read-tree", head],
+                cwd=str(repo_path), check=True, capture_output=True,
+            )
+        else:
+            # Unborn HEAD - no tree to reset to, but a stray staged entry
+            # from a crash before this repo's first-ever commit is still
+            # possible and still needs discarding.
+            subprocess.run(
+                ["git", "read-tree", "--empty"],
+                cwd=str(repo_path), check=True, capture_output=True,
+            )
+
+
+def existing_mirror_repos(base_dir: Path) -> list[Path]:
+    """Every git repo (bare or non-bare) under base_dir, at any depth -
+    mirror repos nest at repo_dir_name()-derived depth, not as flat
+    children of base_dir. Does not descend into a found repo's own
+    internals (.git/, or objects/ for a bare repo) once identified."""
+    if not base_dir.is_dir():
+        return []
+    found = []
+    for root, dirs, _files in os.walk(base_dir):
+        root_path = Path(root)
+        if _is_initialized(root_path):
+            found.append(root_path)
+            dirs[:] = []
+    return found
+
+
+def reset_stale_indexes(base_dir: Path) -> list[Path]:
+    """reset_stale_index() for every existing mirror repo under base_dir.
+    Returns the repos it touched."""
+    repos = existing_mirror_repos(base_dir)
+    for repo_path in repos:
+        reset_stale_index(repo_path)
+    return repos
+
+
 def commit_info(repo_path: Path, relpath: str) -> CommitInfo | None:
     """Author + timestamp of the commit head_rev() resolves to, or None if
     relpath has no commit history in this repo."""
