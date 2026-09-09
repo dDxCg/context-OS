@@ -9,7 +9,7 @@ def db_handler():
     conn = sqlite3.connect(":memory:")
 
     schema = Path(
-        "data/schema.sql"
+        "src/vcs/db/schema.sql"
     ).read_text()
 
     conn.executescript(schema)

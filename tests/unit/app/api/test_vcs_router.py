@@ -24,7 +24,7 @@ def db_handler():
     different worker thread than this fixture, so the connection needs
     check_same_thread=False (see app/api/deps.py)."""
     conn = sqlite3.connect(":memory:", check_same_thread=False)
-    conn.executescript(Path("data/schema.sql").read_text())
+    conn.executescript(Path("src/vcs/db/schema.sql").read_text())
     yield DBHandler(conn=conn)
     conn.close()
 

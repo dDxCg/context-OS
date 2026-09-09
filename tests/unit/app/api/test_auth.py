@@ -12,7 +12,7 @@ from vcs.db.sqlite import DBHandler
 @pytest.fixture
 def db_handler():
     conn = sqlite3.connect(":memory:", check_same_thread=False)
-    conn.executescript(Path("data/schema.sql").read_text())
+    conn.executescript(Path("src/vcs/db/schema.sql").read_text())
     yield DBHandler(conn=conn)
     conn.close()
 

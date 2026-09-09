@@ -22,7 +22,7 @@ def isolate_git_repo_dir(tmp_path, monkeypatch):
 def db_path(tmp_path, monkeypatch):
     path = tmp_path / "test.sqlite"
     conn = sqlite3.connect(str(path))
-    conn.executescript(Path("data/schema.sql").read_text())
+    conn.executescript(Path("src/vcs/db/schema.sql").read_text())
     conn.close()
     monkeypatch.setattr(cli_app, "get_db_url", lambda: str(path))
     return path

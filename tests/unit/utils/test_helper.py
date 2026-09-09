@@ -1,10 +1,14 @@
+import sys
 from pathlib import Path
 
 
+import utils.helper as helper
 from utils.helper import (
     PROJECT_ROOT,
     anchored,
     get_config_path,
+    get_db_url,
+    get_schema_path,
     read_file,
     read_text_file,
     save_to_file,
@@ -138,3 +142,149 @@ def test_get_config_path_defaults_when_unset(monkeypatch):
     monkeypatch.delenv("CONFIG_PATH", raising=False)
 
     assert get_config_path() is not None
+
+
+def test_ac1_resolve_project_root_uses_chrono_ctx_home_override(monkeypatch, tmp_path):
+    override = tmp_path / "custom-home"
+    monkeypatch.setenv("CHRONO_CTX_HOME", str(override))
+
+    result = helper._resolve_project_root(tmp_path / "unrelated-candidate")
+
+    assert result == override.resolve()
+
+
+def test_ac2_resolve_project_root_uses_candidate_when_it_is_a_source_checkout(monkeypatch, tmp_path):
+    monkeypatch.delenv("CHRONO_CTX_HOME", raising=False)
+    (tmp_path / "pyproject.toml").write_text("")
+
+    result = helper._resolve_project_root(tmp_path)
+
+    assert result == tmp_path
+
+
+def test_ac3_resolve_project_root_falls_back_to_user_data_dir_when_no_marker(monkeypatch, tmp_path):
+    monkeypatch.delenv("CHRONO_CTX_HOME", raising=False)
+    no_marker_candidate = tmp_path / "site-packages" / "utils"
+    no_marker_candidate.mkdir(parents=True)
+
+    result = helper._resolve_project_root(no_marker_candidate)
+
+    assert result == helper._default_user_data_dir()
+
+
+def test_default_user_data_dir_windows_uses_localappdata(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\someone\AppData\Local")
+
+    result = helper._default_user_data_dir()
+
+    assert result == Path(r"C:\Users\someone\AppData\Local") / "chrono-ctx"
+
+
+def test_default_user_data_dir_macos_uses_application_support(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    result = helper._default_user_data_dir()
+
+    assert result == Path.home() / "Library" / "Application Support" / "chrono-ctx"
+
+
+def test_default_user_data_dir_linux_respects_xdg_data_home(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("XDG_DATA_HOME", "/custom/data")
+
+    result = helper._default_user_data_dir()
+
+    assert result == Path("/custom/data") / "chrono-ctx"
+
+
+def test_default_user_data_dir_linux_falls_back_to_local_share(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+
+    result = helper._default_user_data_dir()
+
+    assert result == Path.home() / ".local" / "share" / "chrono-ctx"
+
+
+def test_ac4_get_db_url_defaults_in_dev_mode_when_unconfigured(monkeypatch, tmp_path):
+    monkeypatch.setattr(helper, "PROJECT_ROOT", tmp_path)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("MODE", "dev")
+
+    assert get_db_url() == str(tmp_path / "data" / "db-dev.sqlite")
+
+
+def test_ac5_get_db_url_defaults_in_prod_mode_when_unconfigured(monkeypatch, tmp_path):
+    monkeypatch.setattr(helper, "PROJECT_ROOT", tmp_path)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("MODE", "prod")
+
+    assert get_db_url() == str(tmp_path / "data" / "db.sqlite")
+
+
+def test_ac6_get_db_url_still_honors_explicit_database_url(monkeypatch, tmp_path):
+    monkeypatch.setattr(helper, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setenv("DATABASE_URL", "explicit.sqlite")
+
+    assert get_db_url() == str(tmp_path / "explicit.sqlite")
+
+
+def test_ac1_get_schema_path_resolves_via_importlib_resources_when_unset(monkeypatch):
+    """schema.sql is packaged code (spec 030), not PROJECT_ROOT-anchored
+    user data - must resolve correctly regardless of cwd/PROJECT_ROOT."""
+    monkeypatch.delenv("SCHEMA_PATH", raising=False)
+
+    result = get_schema_path()
+
+    assert Path(result).is_file()
+    assert Path(result).read_text() == Path("src/vcs/db/schema.sql").read_text()
+
+
+def test_ac2_get_schema_path_still_honors_explicit_schema_path_override(monkeypatch, tmp_path):
+    custom = tmp_path / "custom-schema.sql"
+    custom.write_text("CREATE TABLE custom (id INTEGER);")
+    monkeypatch.setattr(helper, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setenv("SCHEMA_PATH", "custom-schema.sql")
+
+    assert get_schema_path() == str(custom)
+
+
+def test_ac1_default_mode_is_dev_for_a_source_checkout(tmp_path):
+    (tmp_path / "pyproject.toml").write_text("")
+
+    assert helper._default_mode(tmp_path) == "dev"
+
+
+def test_ac2_default_mode_is_prod_for_a_packaged_install(tmp_path):
+    no_marker_candidate = tmp_path / "site-packages" / "utils"
+    no_marker_candidate.mkdir(parents=True)
+
+    assert helper._default_mode(no_marker_candidate) == "prod"
+
+
+def test_ac1_get_db_url_defaults_to_dev_db_in_a_source_checkout(monkeypatch, tmp_path):
+    monkeypatch.setattr(helper, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(helper, "_DEFAULT_MODE", "dev")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("MODE", raising=False)
+
+    assert get_db_url() == str(tmp_path / "data" / "db-dev.sqlite")
+
+
+def test_ac2_get_db_url_defaults_to_prod_db_in_a_packaged_install(monkeypatch, tmp_path):
+    monkeypatch.setattr(helper, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(helper, "_DEFAULT_MODE", "prod")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("MODE", raising=False)
+
+    assert get_db_url() == str(tmp_path / "data" / "db.sqlite")
+
+
+def test_ac3_get_db_url_explicit_mode_still_wins_in_a_packaged_install(monkeypatch, tmp_path):
+    monkeypatch.setattr(helper, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(helper, "_DEFAULT_MODE", "prod")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("MODE", "dev")
+
+    assert get_db_url() == str(tmp_path / "data" / "db-dev.sqlite")
