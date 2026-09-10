@@ -1,5 +1,8 @@
+import os
 import subprocess
+import sys
 import threading
+from pathlib import Path
 
 import filelock
 import pytest
@@ -63,6 +66,150 @@ def test_ac1_init_repo_blocks_while_repo_lock_held(repo_path):
 
     assert done.wait(timeout=2.0), "init_repo() never completed after the lock was released"
     thread.join()
+
+
+def test_ac6_git_timeout_budget_fits_inside_the_lock_timeout(repo_path):
+    """Spec 037 AC-6: the longest locked sequence (write()/move(), six git
+    calls) must finish well inside LOCK_TIMEOUT, or a waiter can give up
+    while a legitimately-working holder is still going. Asserted so the two
+    constants can't drift apart."""
+    assert 6 * git_store.GIT_TIMEOUT < git_store.LOCK_TIMEOUT
+
+
+def test_ac1_no_direct_subprocess_run_call_sites_remain():
+    """Every git call must route through _run_git(), or a call site can
+    silently opt out of the timeout/stdin/env policy by being written the
+    old way."""
+    source = Path(git_store.__file__).read_text()
+    body = source.split("def _run_git", 1)[1]
+    later_defs = body.split("\ndef ", 1)[1]
+
+    assert "subprocess.run" not in later_defs
+
+
+def test_ac2_run_git_times_out_instead_of_blocking_forever(repo_path, monkeypatch):
+    """A hung git must raise TimeoutExpired, not block indefinitely -
+    verified with a fake slow command and a short overridden timeout so the
+    test stays fast."""
+    git_store.init_repo(repo_path)
+    monkeypatch.setattr(git_store, "GIT_TIMEOUT", 0.2)
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        git_store._run_git(
+            [sys.executable, "-c", "import time; time.sleep(5)"], repo_path
+        )
+
+
+def test_ac3_run_git_passes_devnull_stdin_when_no_input_given(repo_path, monkeypatch):
+    """In the MCP server the parent's stdin is the JSON-RPC pipe: a git
+    subprocess that inherits it can block forever reading it and steal
+    protocol bytes."""
+    git_store.init_repo(repo_path)
+    captured = {}
+
+    def fake_run(*args, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(args, 0, b"", b"")
+
+    monkeypatch.setattr(git_store.subprocess, "run", fake_run)
+    git_store._run_git(["git", "status"], repo_path)
+
+    assert captured["stdin"] is subprocess.DEVNULL
+
+
+def test_ac3_run_git_does_not_override_stdin_when_input_is_given(repo_path, monkeypatch):
+    """_hash_object feeds content through the pipe - passing DEVNULL too
+    would be a conflicting argument."""
+    git_store.init_repo(repo_path)
+    captured = {}
+
+    def fake_run(*args, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(args, 0, b"", b"")
+
+    monkeypatch.setattr(git_store.subprocess, "run", fake_run)
+    git_store._run_git(["git", "hash-object"], repo_path, input=b"hello")
+
+    assert captured.get("stdin") is None
+    assert captured["input"] == b"hello"
+
+
+def test_ac4_run_git_disables_terminal_prompts(repo_path, monkeypatch):
+    """DEVNULL alone turns a prompt into a confusing EOF read; this makes
+    git fail cleanly instead of trying to prompt at all."""
+    git_store.init_repo(repo_path)
+    captured = {}
+
+    def fake_run(*args, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(args, 0, b"", b"")
+
+    monkeypatch.setattr(git_store.subprocess, "run", fake_run)
+    git_store._run_git(["git", "status"], repo_path)
+
+    assert captured["env"]["GIT_TERMINAL_PROMPT"] == "0"
+    assert "PATH" in captured["env"], "the rest of os.environ must survive"
+
+
+def test_ac4_run_git_preserves_a_caller_supplied_env(repo_path, monkeypatch):
+    """_commit_tree passes GIT_AUTHOR_*/GIT_COMMITTER_* - those must not be
+    dropped when the prompt setting is added."""
+    git_store.init_repo(repo_path)
+    captured = {}
+
+    def fake_run(*args, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(args, 0, b"", b"")
+
+    monkeypatch.setattr(git_store.subprocess, "run", fake_run)
+    git_store._run_git(
+        ["git", "commit-tree"], repo_path, env={**os.environ, "GIT_AUTHOR_NAME": "Someone"}
+    )
+
+    assert captured["env"]["GIT_AUTHOR_NAME"] == "Someone"
+    assert captured["env"]["GIT_TERMINAL_PROMPT"] == "0"
+
+
+def test_ac1_lock_for_uses_the_configured_lock_timeout(repo_path):
+    """Spec 036 / issue #29: filelock.FileLock defaults to timeout=-1
+    (block forever) - _lock_for() must bound it instead."""
+    lock = git_store._lock_for(repo_path)
+
+    assert lock.timeout == git_store.LOCK_TIMEOUT == 30.0
+
+
+def test_ac2_write_raises_timeout_instead_of_blocking_forever_when_contended(repo_path, monkeypatch):
+    """A contended lock must eventually give up, not hang indefinitely -
+    verified with a short overridden timeout so the test stays fast.
+
+    Contention must come from a separate thread: filelock's FileLock is
+    reentrant for the *same* thread reusing the *same* instance (the
+    module-level `_locks` cache), so a same-thread re-acquire would pass
+    trivially without exercising the timeout at all."""
+    monkeypatch.setattr(git_store, "LOCK_TIMEOUT", 0.2)
+    git_store.init_repo(repo_path)
+    lock = git_store._lock_for(repo_path)
+    lock.acquire()
+    errors = []
+
+    def call_write():
+        try:
+            git_store.write(
+                repo_path, "a.txt", b"hello",
+                message="add a.txt", author="Test Author <test@chrono-ctx.local>",
+            )
+        except filelock.Timeout as e:
+            errors.append(e)
+
+    thread = threading.Thread(target=call_write)
+    thread.start()
+    try:
+        thread.join(timeout=2.0)
+    finally:
+        lock.release()
+
+    assert not thread.is_alive(), "write() never gave up while the lock was held"
+    assert len(errors) == 1
 
 
 def test_ac2_write_creates_first_commit_with_message_and_author(initialized_repo):

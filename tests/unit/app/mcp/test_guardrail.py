@@ -1,6 +1,10 @@
+import logging
 import sqlite3
+import subprocess
 from pathlib import Path
 
+import anyio
+import filelock
 import yaml
 import pytest
 from fastmcp import Client
@@ -416,6 +420,249 @@ async def test_failed_operation_does_not_persist_the_scope_grant(config_path, tm
 
     assert result.data["status"] == "error"
     assert config_path.read_bytes() == before
+
+
+@pytest.mark.anyio
+async def test_ac3_read_file_returns_error_instead_of_hanging_when_lock_contended(source_dir, monkeypatch):
+    """Spec 036 / issue #29: a contended mirror-repo lock now raises
+    filelock.Timeout (an OSError subclass) instead of blocking forever -
+    read_file's version lookup must surface that as a clean error, not an
+    unhandled exception through the MCP transport."""
+    target = source_dir / "doc.txt"
+    target.write_text("hello")
+    monkeypatch.setattr(
+        "app.mcp.server.current_version",
+        lambda path, watch_targets=None: (_ for _ in ()).throw(filelock.Timeout("repo lock")),
+    )
+
+    async with Client(server.mcp, elicitation_handler=_fail_if_called) as client:
+        result = await client.call_tool("read_file", {"path": str(target)})
+
+    assert result.data["status"] == "error"
+
+
+@pytest.mark.anyio
+async def test_ac4_write_file_returns_error_instead_of_hanging_when_lock_contended(source_dir, monkeypatch):
+    """Same as above, via _check_expected_version()'s current_version() call
+    - only exercised when expected_version is passed."""
+    target = source_dir / "doc.txt"
+    target.write_text("hello")
+    monkeypatch.setattr(
+        "app.mcp.server.current_version",
+        lambda path, watch_targets=None: (_ for _ in ()).throw(filelock.Timeout("repo lock")),
+    )
+
+    async with Client(server.mcp, elicitation_handler=_fail_if_called) as client:
+        result = await client.call_tool(
+            "write_file",
+            {"path": str(target), "content": "new", "expected_version": "some-rev"},
+        )
+
+    assert result.data["status"] == "error"
+    assert target.read_text() == "hello"
+
+
+def test_ac1_logging_setup_writes_to_a_file_and_never_to_stdout(tmp_path, monkeypatch):
+    """stdout carries the JSON-RPC protocol - a handler on it corrupts the
+    stream. And stderr from a stdio server goes nowhere durable, which is
+    why 'check the log' found nothing after the hang that prompted 038."""
+    import sys
+
+    log_path = tmp_path / "mcp.log"
+    monkeypatch.setattr(server, "LOG_PATH", log_path)
+    root = logging.getLogger()
+    before = list(root.handlers)
+    try:
+        server._setup_file_logging()
+        added = [h for h in root.handlers if h not in before]
+
+        assert any(isinstance(h, logging.FileHandler) for h in added)
+        for handler in added:
+            assert getattr(handler, "stream", None) is not sys.stdout
+        logging.getLogger(__name__).warning("probe line")
+        for handler in added:
+            handler.flush()
+        assert "probe line" in log_path.read_text(encoding="utf-8")
+    finally:
+        for handler in [h for h in root.handlers if h not in before]:
+            root.removeHandler(handler)
+            handler.close()
+
+
+def test_ec1_logging_setup_does_not_raise_when_the_path_is_unwritable(tmp_path, monkeypatch):
+    """A server that refuses to start because it can't log is strictly
+    worse than one that runs unlogged."""
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory")
+    monkeypatch.setattr(server, "LOG_PATH", blocker / "nested" / "mcp.log")
+
+    server._setup_file_logging()
+
+
+@pytest.mark.anyio
+async def test_ac2_tool_call_logs_entry_and_exit_with_the_path_but_not_content(source_dir, caplog):
+    """Paths only - these are the user's context sources, and this file
+    would otherwise become a plaintext copy of watched documents."""
+    target = source_dir / "doc.txt"
+
+    with caplog.at_level(logging.INFO):
+        async with Client(server.mcp, elicitation_handler=_fail_if_called) as client:
+            await client.call_tool(
+                "create_file", {"path": str(target), "content": "SECRET-CONTENT-MARKER"}
+            )
+
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "create_file" in text
+    assert "doc.txt" in text
+    assert "SECRET-CONTENT-MARKER" not in text
+
+
+@pytest.mark.anyio
+async def test_ac3_set_actor_hint_uses_a_short_timeout_not_the_30s_default(source_dir, monkeypatch):
+    """Spec 038 AC-3: waiting 30s for bookkeeping the code is explicitly
+    willing to skip is the wrong trade - it adds up to 30s to a call that
+    then succeeds anyway."""
+    target = source_dir / "doc.txt"
+    target.write_text("old")
+    captured = {}
+
+    def fake_from_url(db_url, timeout=30.0):
+        captured["timeout"] = timeout
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(server.DBHandler, "from_url", staticmethod(fake_from_url))
+
+    async with Client(server.mcp, elicitation_handler=_fail_if_called) as client:
+        result = await client.call_tool(
+            "write_file", {"path": str(target), "content": "new"}
+        )
+
+    assert captured["timeout"] == server.HINT_DB_TIMEOUT == 2.0
+    # AC-4: best-effort contract unchanged - the write still succeeds.
+    assert result.data == {"status": "ok"}
+
+
+@pytest.mark.anyio
+async def test_ac4_set_actor_hint_logs_a_warning_when_it_gives_up(source_dir, monkeypatch, caplog):
+    """A permanently broken DB - every write silently losing actor
+    attribution - must not stay invisible forever."""
+    target = source_dir / "doc.txt"
+    target.write_text("old")
+
+    def fake_from_url(db_url, timeout=30.0):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(server.DBHandler, "from_url", staticmethod(fake_from_url))
+
+    with caplog.at_level(logging.WARNING):
+        async with Client(server.mcp, elicitation_handler=_fail_if_called) as client:
+            await client.call_tool("write_file", {"path": str(target), "content": "new"})
+
+    assert any(r.levelno == logging.WARNING for r in caplog.records)
+
+
+@pytest.mark.anyio
+async def test_ac5_ensure_scope_logs_the_exception_when_its_catch_all_fires(config_path, tmp_path, caplog):
+    """A bug in the elicitation path and a user clicking 'no' are
+    indistinguishable to the caller by design (fail closed) - they must at
+    least be distinguishable in the log."""
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_config(config_path, [{"type": "local", "path": str(source)}])
+    outside = tmp_path / "outside.txt"
+    outside.write_text("hi")
+
+    async def _boom(message, response_type, params, ctx):
+        raise RuntimeError("elicitation machinery is broken")
+
+    with caplog.at_level(logging.ERROR):
+        async with Client(server.mcp, elicitation_handler=_boom) as client:
+            result = await client.call_tool("read_file", {"path": str(outside)})
+
+    assert result.data["status"] == "denied"
+    assert any("elicitation machinery is broken" in r.getMessage() or r.exc_info
+               for r in caplog.records)
+
+
+@pytest.mark.anyio
+async def test_ac6_elicit_that_never_resolves_is_abandoned_and_treated_as_a_decline(
+    config_path, tmp_path, monkeypatch
+):
+    """A client that never renders the prompt must not hold the call open
+    forever."""
+    import app.mcp.guardrail as guardrail
+
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_config(config_path, [{"type": "local", "path": str(source)}])
+    outside = tmp_path / "outside.txt"
+    outside.write_text("hi")
+    monkeypatch.setattr(guardrail, "ELICIT_TIMEOUT", 0.2)
+
+    async def _never_answers(message, response_type, params, ctx):
+        # Only needs to outlast the patched 0.2s timeout. A long sleep here
+        # would still be awaited to completion during client teardown even
+        # though wait_for already abandoned it - 30s of dead test time.
+        await anyio.sleep(1)
+
+    async with Client(server.mcp, elicitation_handler=_never_answers) as client:
+        result = await client.call_tool("read_file", {"path": str(outside)})
+
+    assert result.data["status"] == "denied"
+    assert config_path.read_text() == yaml.safe_dump(
+        {"sources": [{"type": "local", "path": str(source)}]}
+    )
+
+
+@pytest.mark.anyio
+async def test_ac7_git_timeout_returns_structured_error_not_a_transport_error(source_dir, monkeypatch):
+    """spec 037 bounds git with subprocess.TimeoutExpired, which is NOT an
+    OSError subclass (unlike filelock.Timeout) - so it isn't covered by
+    IO_ERRORS unless listed explicitly."""
+    target = source_dir / "doc.txt"
+    target.write_text("hello")
+    monkeypatch.setattr(
+        "app.mcp.server.current_version",
+        lambda path, watch_targets=None: (_ for _ in ()).throw(
+            subprocess.TimeoutExpired(["git", "log"], 4.0)
+        ),
+    )
+
+    async with Client(server.mcp, elicitation_handler=_fail_if_called) as client:
+        result = await client.call_tool("read_file", {"path": str(target)})
+
+    assert result.data["status"] == "error"
+
+
+@pytest.mark.anyio
+async def test_ac8_scope_persistence_failure_does_not_report_a_successful_write_as_failed(
+    config_path, tmp_path, monkeypatch
+):
+    """grant.commit() rewrites config.yaml *after* the write already
+    landed. If it raises, the caller must not be told the write failed -
+    an agent acting on that retries a write that already happened."""
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_config(config_path, [{"type": "local", "path": str(source)}])
+    outside = tmp_path / "outside" / "doc.txt"
+    outside.parent.mkdir(parents=True, exist_ok=True)
+
+    import app.mcp.guardrail as guardrail
+
+    def _boom(self):
+        raise OSError("config.yaml is read-only")
+
+    monkeypatch.setattr(guardrail.ScopeGrant, "commit", _boom)
+
+    async with Client(server.mcp, elicitation_handler=_approve) as client:
+        result = await client.call_tool(
+            "create_file", {"path": str(outside), "content": "brand new"}
+        )
+
+    assert result.data["status"] == "ok"
+    assert outside.read_text() == "brand new"
+    assert "scope_persisted" in result.data
+    assert result.data["scope_persisted"] is False
 
 
 @pytest.mark.anyio

@@ -1146,3 +1146,73 @@ an unrelated file committed first (different author), then the target actor crea
 brand-new path in the same repo - `rollback_session` now deletes it instead of crashing.
 Re-verified live via [scripts/live_integration_test.py](../../scripts/live_integration_test.py) -
 `E.rollback_session` now passes.
+
+## 29. ~~`_lock_for()`'s cross-process `FileLock` has no timeout — a contended write hangs forever, not until any bounded 30s~~ — FIXED
+
+**File:** `src/vcs/services/git_store.py:26-31`
+
+```python
+def _lock_for(repo_path: Path) -> FileLock:
+    key = str(repo_path.resolve())
+    with _locks_guard:
+        if key not in _locks:
+            _locks[key] = FileLock(str(repo_path / ".chrono-ctx.lock"))
+        return _locks[key]
+```
+
+No `timeout=` argument. `filelock.FileLock`'s default is `-1` (confirmed via
+`inspect.signature(FileLock.__init__)`) - block indefinitely. Every
+`write()`/`remove()`/`move()`/`init_repo()`/`reset_stale_index()` call
+acquires this lock via `with _lock_for(repo_path):`, so any of them can
+stall forever if another process is holding it.
+
+Found live (2026-09-09) testing the MCP server with 3 concurrent Claude
+Code sessions all pointed at this same project (`claude mcp list`/process
+listing confirmed 3 independent `uv run python -m app.mcp.server`
+instances, each spawned by a different session, all sharing the same
+`config.yaml` and therefore the same mirror repos). An MCP `write_file`
+call (`app/mcp/server.py`) that goes through `_check_expected_version()` →
+`current_version()` → `git_store.init_repo()`/`head_rev()` hit exactly this
+lock. This was never a real risk with a single daemon as the only writer
+(spec 022's AC-1 explicitly chose "blocks until released" as correct
+behavior, written when only one contending caller was ever realistic) -
+it becomes one the moment multiple independent processes routinely touch
+the same mirror repo, which concurrent MCP sessions now make normal.
+
+**Symptom, live-observed:** a `write_file` call hung, then eventually
+surfaced `Connection closed` (once) and, on a retry, `Error calling tool
+'write_file': Command '['git', 'config', 'user.email', ...]' returned
+non-zero exit status 1` (once) - consistent with the MCP client's own
+transport-level timeout (~30s) giving up on a request that was blocked
+server-side with no bound of its own, rather than chrono-ctx itself ever
+deciding to fail fast. The exact `git config` exit-1 shape wasn't
+reproduced a second time and may be a separate, transient issue (e.g.
+Windows AV/OneDrive interference on a freshly-created `.git` dir) - not
+confirmed as the same root cause, flagged rather than assumed.
+
+Ruled out as the primary cause: `DBHandler.from_url()`'s SQLite
+`timeout=30.0` (issue #20/spec 016) - `_set_actor_hint()` is the only MCP
+call-path user of it, and it silently swallows `sqlite3.Error`
+(best-effort hint bookkeeping), so it can only produce a silent ~30s
+stall, never a visible trace - doesn't match what was actually observed.
+
+**Consequence:** any MCP write/delete/move call (or CLI/API call) against
+a mirror repo another process is mid-operation on has no bounded wait and
+no clean error - it either eventually succeeds after an arbitrarily long
+stall, or the *caller's* own unrelated timeout mechanism aborts it first,
+surfacing a confusing transport-level error instead of a clear
+"repo busy, try again" from chrono-ctx itself.
+
+**Fixed:** spec [036](../specs/036-git-store-lock-timeout.md). `_lock_for()`
+now passes `timeout=LOCK_TIMEOUT` (30.0, matching `DBHandler`'s existing
+convention) to `FileLock(...)` - a contended lock now raises
+`filelock.Timeout` (an `OSError` subclass) instead of blocking forever.
+`app/mcp/server.py`'s two previously-unwrapped `current_version()` call
+sites (`read_file`, `_check_expected_version()` used by
+`write_file`/`delete_file`) are now inside the existing `except IO_ERRORS`
+boundary, so a timeout returns `{"status": "error", "reason": ...}`
+instead of leaking an unhandled exception through the MCP transport.
+Live-verified with the real (unmocked) code path: a script held the lock
+in one thread while `write()` ran in another with `LOCK_TIMEOUT` set to
+0.5s - raised `filelock.Timeout` at ~0.52s elapsed, not indefinitely;
+normal daemon operation (uncontended write via the watcher) unaffected.

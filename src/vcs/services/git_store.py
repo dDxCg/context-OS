@@ -22,13 +22,60 @@ from filelock import FileLock
 _locks: dict[str, FileLock] = {}
 _locks_guard = threading.Lock()
 
+# filelock.FileLock defaults to timeout=-1 (block forever, issue #29) - a
+# contended lock (now realistic with multiple concurrent MCP sessions
+# sharing a project) would otherwise hang indefinitely instead of failing
+# fast. Matches DBHandler.from_url()'s existing timeout=30.0 convention
+# (issue #20/spec 016) - same tradeoff, already made once in this codebase.
+LOCK_TIMEOUT: float = 30.0
+
+# Per-git-call bound (spec 037). Sized against LOCK_TIMEOUT, not picked in
+# isolation: write()/move() run six git calls under one lock, so the
+# worst-case hold is 6 * GIT_TIMEOUT = 24s against a 30s wait. The 6s
+# margin is the point - at 6 * 5s the two bounds are equal and a waiter
+# could give up at the same instant a legitimately-working holder
+# finishes. Local plumbing commands on a small bare repo normally take
+# single-digit milliseconds.
+GIT_TIMEOUT: float = 4.0
+
 
 def _lock_for(repo_path: Path) -> FileLock:
     key = str(repo_path.resolve())
     with _locks_guard:
         if key not in _locks:
-            _locks[key] = FileLock(str(repo_path / ".chrono-ctx.lock"))
+            _locks[key] = FileLock(str(repo_path / ".chrono-ctx.lock"), timeout=LOCK_TIMEOUT)
         return _locks[key]
+
+
+def _run_git(args, repo_path: Path, *, check: bool = True, text: bool = False,
+             input: bytes | None = None, env: dict | None = None):
+    """Every git invocation goes through here (spec 037), so the timeout,
+    stdin and prompt policy is applied in one place instead of being
+    re-derived - or forgotten - at 24 call sites.
+
+    stdin=DEVNULL matters most in the MCP server, where the parent's stdin
+    is the JSON-RPC pipe: a git subprocess that inherits it can block
+    forever reading a stream that will never carry an answer, and steal
+    protocol bytes while doing it. GIT_TERMINAL_PROMPT=0 is the other half
+    - DEVNULL alone turns a prompt into a confusing EOF read, this makes
+    git refuse to prompt at all. Calls that pass `input` already get a
+    pipe, so their stdin is left alone.
+    """
+    kwargs = {}
+    if input is not None:
+        kwargs["input"] = input
+    else:
+        kwargs["stdin"] = subprocess.DEVNULL
+    return subprocess.run(
+        args,
+        cwd=str(repo_path),
+        check=check,
+        capture_output=True,
+        text=text,
+        timeout=GIT_TIMEOUT,
+        env={**(env if env is not None else os.environ), "GIT_TERMINAL_PROMPT": "0"},
+        **kwargs,
+    )
 
 
 class GitNotAvailableError(RuntimeError):
@@ -102,12 +149,7 @@ def init_repo(repo_path: Path) -> None:
     with _lock_for(repo_path):
         if not _is_initialized(repo_path):
             try:
-                subprocess.run(
-                    ["git", "init", "--bare"],
-                    cwd=str(repo_path),
-                    check=True,
-                    capture_output=True,
-                )
+                _run_git(["git", "init", "--bare"], repo_path)
             except FileNotFoundError as exc:
                 raise GitNotAvailableError(
                     "no `git` binary found on PATH"
@@ -115,14 +157,8 @@ def init_repo(repo_path: Path) -> None:
         # Local, per-repo committer identity - independent of any global git
         # config on the host, and separate from --author (the actor), which
         # write() sets per commit.
-        subprocess.run(
-            ["git", "config", "user.email", "vcs@chrono-ctx.local"],
-            cwd=str(repo_path), check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "config", "user.name", "chrono-ctx"],
-            cwd=str(repo_path), check=True, capture_output=True,
-        )
+        _run_git(["git", "config", "user.email", "vcs@chrono-ctx.local"], repo_path)
+        _run_git(["git", "config", "user.name", "chrono-ctx"], repo_path)
 
 
 def _parse_author(author: str) -> tuple[str, str]:
@@ -143,24 +179,24 @@ def _commit_env(author: str) -> dict:
 
 
 def _hash_object(repo_path: Path, content: bytes) -> str:
-    result = subprocess.run(
+    result = _run_git(
         ["git", "hash-object", "-w", "--stdin"],
-        cwd=str(repo_path), input=content, check=True, capture_output=True,
+        repo_path, input=content,
     )
     return result.stdout.decode().strip()
 
 
 def _write_tree(repo_path: Path) -> str:
-    result = subprocess.run(
-        ["git", "write-tree"], cwd=str(repo_path), check=True, capture_output=True, text=True,
+    result = _run_git(
+        ["git", "write-tree"], repo_path, text=True,
     )
     return result.stdout.strip()
 
 
 def _tree_of(repo_path: Path, commit: str) -> str:
-    result = subprocess.run(
+    result = _run_git(
         ["git", "rev-parse", f"{commit}^{{tree}}"],
-        cwd=str(repo_path), check=True, capture_output=True, text=True,
+        repo_path, text=True,
     )
     return result.stdout.strip()
 
@@ -169,17 +205,17 @@ def _commit_tree(repo_path: Path, tree_sha: str, parent: str | None, message: st
     cmd = ["git", "commit-tree", tree_sha, "-m", message]
     if parent is not None:
         cmd += ["-p", parent]
-    result = subprocess.run(
-        cmd, cwd=str(repo_path), check=True, capture_output=True, text=True,
+    result = _run_git(
+        cmd, repo_path, text=True,
         env=_commit_env(author),
     )
     return result.stdout.strip()
 
 
 def _update_ref_head(repo_path: Path, new_rev: str) -> None:
-    subprocess.run(
+    _run_git(
         ["git", "update-ref", "HEAD", new_rev],
-        cwd=str(repo_path), check=True, capture_output=True,
+        repo_path,
     )
 
 
@@ -194,9 +230,9 @@ def write(repo_path: Path, relpath: str, content: bytes, message: str, author: s
     _require_initialized(repo_path)
     with _lock_for(repo_path):
         blob_sha = _hash_object(repo_path, content)
-        subprocess.run(
+        _run_git(
             ["git", "update-index", "--add", "--cacheinfo", f"100644,{blob_sha},{relpath}"],
-            cwd=str(repo_path), check=True, capture_output=True,
+            repo_path,
         )
         new_tree = _write_tree(repo_path)
         parent = _rev_parse_or_none(repo_path, "HEAD")
@@ -216,9 +252,9 @@ def head_rev(repo_path: Path, relpath: str) -> str | None:
     no-op'd, e.g. a delete of something never tracked) makes `git log` exit
     non-zero rather than print nothing; both cases mean "no history"."""
     _require_initialized(repo_path)
-    result = subprocess.run(
+    result = _run_git(
         ["git", "log", "-1", "--format=%H", "--", relpath],
-        cwd=str(repo_path), capture_output=True, text=True,
+        repo_path, check=False, text=True,
     )
     if result.returncode != 0:
         return None
@@ -233,8 +269,8 @@ def _rev_parse_or_none(repo_path: Path, ref: str) -> str | None:
     string "HEAD" unresolved (confirmed by experiment - a non-bare repo
     correctly exits non-zero for the same case). --verify guarantees a
     real SHA-1 or a non-zero exit, identically for both repo shapes."""
-    result = subprocess.run(
-        ["git", "rev-parse", "--verify", ref], cwd=str(repo_path), capture_output=True, text=True,
+    result = _run_git(
+        ["git", "rev-parse", "--verify", ref], repo_path, check=False, text=True,
     )
     if result.returncode != 0:
         return None
@@ -255,9 +291,9 @@ def remove(repo_path: Path, relpath: str, message: str, author: str) -> str | No
         parent = _rev_parse_or_none(repo_path, "HEAD")
         if parent is None or not path_exists_at_rev(repo_path, relpath, parent):
             return None
-        subprocess.run(
+        _run_git(
             ["git", "rm", "--cached", "-r", "--ignore-unmatch", "--quiet", relpath],
-            cwd=str(repo_path), check=True, capture_output=True,
+            repo_path,
         )
         new_tree = _write_tree(repo_path)
         new_rev = _commit_tree(repo_path, new_tree, parent, message, author)
@@ -267,9 +303,9 @@ def remove(repo_path: Path, relpath: str, message: str, author: str) -> str | No
 
 def _ls_tree_entry(repo_path: Path, rev: str, relpath: str) -> tuple[str, str]:
     """(mode, blob_sha) for relpath in rev's tree."""
-    result = subprocess.run(
+    result = _run_git(
         ["git", "ls-tree", rev, "--", relpath],
-        cwd=str(repo_path), check=True, capture_output=True, text=True,
+        repo_path, text=True,
     )
     meta, _, _ = result.stdout.strip().partition("\t")
     mode, _obj_type, sha = meta.split(" ")
@@ -287,13 +323,13 @@ def move(repo_path: Path, src_relpath: str, dst_relpath: str, message: str, auth
         if parent is None or not path_exists_at_rev(repo_path, src_relpath, parent):
             return None
         mode, blob_sha = _ls_tree_entry(repo_path, parent, src_relpath)
-        subprocess.run(
+        _run_git(
             ["git", "update-index", "--add", "--cacheinfo", f"{mode},{blob_sha},{dst_relpath}"],
-            cwd=str(repo_path), check=True, capture_output=True,
+            repo_path,
         )
-        subprocess.run(
+        _run_git(
             ["git", "rm", "--cached", "-r", "--ignore-unmatch", "--quiet", src_relpath],
-            cwd=str(repo_path), check=True, capture_output=True,
+            repo_path,
         )
         new_tree = _write_tree(repo_path)
         new_rev = _commit_tree(repo_path, new_tree, parent, message, author)
@@ -314,17 +350,17 @@ def reset_stale_index(repo_path: Path) -> None:
     with _lock_for(repo_path):
         head = _rev_parse_or_none(repo_path, "HEAD")
         if head is not None:
-            subprocess.run(
+            _run_git(
                 ["git", "read-tree", head],
-                cwd=str(repo_path), check=True, capture_output=True,
+                repo_path,
             )
         else:
             # Unborn HEAD - no tree to reset to, but a stray staged entry
             # from a crash before this repo's first-ever commit is still
             # possible and still needs discarding.
-            subprocess.run(
+            _run_git(
                 ["git", "read-tree", "--empty"],
-                cwd=str(repo_path), check=True, capture_output=True,
+                repo_path,
             )
 
 
@@ -360,9 +396,9 @@ def commit_info(repo_path: Path, relpath: str) -> CommitInfo | None:
     rev = head_rev(repo_path, relpath)
     if rev is None:
         return None
-    result = subprocess.run(
+    result = _run_git(
         ["git", "log", "-1", "--format=%an <%ae>|%aI", "--", relpath],
-        cwd=str(repo_path), check=True, capture_output=True, text=True,
+        repo_path, text=True,
     )
     author, timestamp = result.stdout.strip().split("|", 1)
     return CommitInfo(rev=rev, author=author, timestamp=timestamp)
@@ -373,9 +409,9 @@ def log_history(repo_path: Path, relpath: str) -> list[dict]:
     touching relpath, newest first. Empty list if relpath has no history
     (including an unborn-HEAD repo, same non-zero-exit case as head_rev)."""
     _require_initialized(repo_path)
-    result = subprocess.run(
+    result = _run_git(
         ["git", "log", "--follow", "--format=%H|%an <%ae>|%aI|%s", "--", relpath],
-        cwd=str(repo_path), capture_output=True, text=True,
+        repo_path, check=False, text=True,
     )
     if result.returncode != 0:
         return []
@@ -389,9 +425,9 @@ def log_history(repo_path: Path, relpath: str) -> list[dict]:
 def diff(repo_path: Path, relpath: str, rev1: str, rev2: str) -> str:
     """Unified diff text of relpath between rev1 and rev2."""
     _require_initialized(repo_path)
-    result = subprocess.run(
+    result = _run_git(
         ["git", "diff", rev1, rev2, "--", relpath],
-        cwd=str(repo_path), check=True, capture_output=True, text=True,
+        repo_path, text=True,
     )
     return result.stdout
 
@@ -402,9 +438,9 @@ def path_exists_at_rev(repo_path: Path, relpath: str, rev: str) -> bool:
     a shared mirror repo - spec 024, issue #28), not an error - unlike
     show(), this never raises for a missing path."""
     _require_initialized(repo_path)
-    result = subprocess.run(
+    result = _run_git(
         ["git", "cat-file", "-e", f"{rev}:{relpath}"],
-        cwd=str(repo_path), capture_output=True,
+        repo_path, check=False,
     )
     return result.returncode == 0
 
@@ -412,9 +448,9 @@ def path_exists_at_rev(repo_path: Path, relpath: str, rev: str) -> bool:
 def show(repo_path: Path, relpath: str, rev: str) -> bytes:
     """Content of relpath as of rev."""
     _require_initialized(repo_path)
-    result = subprocess.run(
+    result = _run_git(
         ["git", "show", f"{rev}:{relpath}"],
-        cwd=str(repo_path), check=True, capture_output=True,
+        repo_path,
     )
     return result.stdout
 
@@ -427,9 +463,9 @@ def commits_by_author(repo_path: Path, author_name: str) -> list[dict]:
     unambiguously - safer than parsing --name-only interleaved with a
     custom format line, since a path can contain "|"."""
     _require_initialized(repo_path)
-    result = subprocess.run(
+    result = _run_git(
         ["git", "log", "--reverse", "--format=%H|%P|%an|%aI"],
-        cwd=str(repo_path), capture_output=True, text=True,
+        repo_path, check=False, text=True,
     )
     if result.returncode != 0:
         return []
@@ -441,9 +477,9 @@ def commits_by_author(repo_path: Path, author_name: str) -> list[dict]:
         if author != author_name:
             continue
         parent = parents.split()[0] if parents else None
-        paths_result = subprocess.run(
+        paths_result = _run_git(
             ["git", "show", "--format=", "--name-only", rev],
-            cwd=str(repo_path), check=True, capture_output=True, text=True,
+            repo_path, text=True,
         )
         paths = [p for p in paths_result.stdout.strip().splitlines() if p]
         commits.append({"rev": rev, "parent": parent, "timestamp": timestamp, "paths": paths})

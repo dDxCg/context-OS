@@ -17,3 +17,4 @@ data/snapshots
 data/repo
 data/ctx.pid
 data/ctx.log
+data/mcp.log
