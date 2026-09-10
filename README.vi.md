@@ -99,6 +99,109 @@ export PATH="$PATH:<thư mục trong cảnh báo>"
 
 Cần `git` trên PATH (storage backend shell ra `git` qua subprocess).
 
+## Kết nối AI agent (MCP)
+
+MCP server chạy qua **stdio** — không URL, không port. Mọi client bên dưới đều
+spawn nó như một subprocess, nên thứ duy nhất cần khai báo là câu lệnh.
+
+### 1. Lệnh khởi chạy
+
+Dùng runner nào cũng được — cả hai tự tải hoặc tái dùng package, không cần cài
+gì trước:
+
+```bash
+uvx --from chrono-ctx python -m app.mcp.server        # uv
+pipx run --spec chrono-ctx python -m app.mcp.server   # pipx
+```
+
+Ví dụ bên dưới dùng dạng `uvx`; muốn đổi sang `pipx run` thì thay cặp
+`command`/`args` tương ứng.
+
+### 2. Đăng ký với client
+
+**Claude Code** — một lệnh, không cần sửa file:
+
+```bash
+claude mcp add chrono-ctx -- uvx --from chrono-ctx python -m app.mcp.server
+claude mcp add --scope project chrono-ctx -- <command> <args...>   # ghi vào .mcp.json để commit cho cả team
+```
+
+**Claude Desktop** — `claude_desktop_config.json` (Settings → Developer → Edit
+Config; `%APPDATA%\Claude\` trên Windows, `~/Library/Application Support/Claude/`
+trên macOS):
+
+```json
+{
+  "mcpServers": {
+    "chrono-ctx": {
+      "command": "uvx",
+      "args": ["--from", "chrono-ctx", "python", "-m", "app.mcp.server"]
+    }
+  }
+}
+```
+
+**Codex CLI** — `~/.codex/config.toml` (chú ý `mcp_servers`, có dấu gạch dưới).
+Nên dùng `codex mcp add`, vì một dòng TOML sai cú pháp làm chết toàn bộ server:
+
+```toml
+[mcp_servers.chrono-ctx]
+command = "uvx"
+args = ["--from", "chrono-ctx", "python", "-m", "app.mcp.server"]
+```
+
+**VS Code / GitHub Copilot** — `.vscode/mcp.json` (workspace) hoặc file trong
+user profile. Key gốc của VS Code là `servers`, **không phải** `mcpServers`:
+
+```json
+{
+  "servers": {
+    "chrono-ctx": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["--from", "chrono-ctx", "python", "-m", "app.mcp.server"]
+    }
+  }
+}
+```
+
+**Cursor** — `.cursor/mcp.json` (project) hoặc `~/.cursor/mcp.json` (global);
+**Windsurf** — `~/.codeium/windsurf/mcp_config.json`
+(`%USERPROFILE%\.codeium\windsurf\` trên Windows); **Gemini CLI** —
+`.gemini/settings.json` (project) hoặc `~/.gemini/settings.json`. Cả ba dùng
+đúng block `mcpServers` như Claude Desktop ở trên. Sửa xong nhớ khởi động lại
+client.
+
+### 3. Trỏ agent về cùng dữ liệu với daemon
+
+MCP server cố tình bỏ qua cwd (client là bên chọn cwd, và dựa vào nó sẽ âm thầm
+tách hai tiến trình sang hai file `config.yaml` khác nhau). Nó resolve mọi thứ
+theo `CHRONO_CTX_HOME`, mặc định là thư mục dữ liệu per-user.
+
+Mặc định đó đã khớp với daemon cài bằng `pipx`/`pip`, nên đa số setup không cần
+làm gì thêm. **Chỉ lệch khi daemon chạy từ source checkout**, vì lúc đó nó anchor
+vào repo root — triệu chứng rất im lặng: file vẫn được ghi xuống đĩa nhưng không
+có gì được versioning. Trường hợp đó pin rõ:
+
+```json
+"env": { "CHRONO_CTX_HOME": "/path/to/chrono-ctx" }
+```
+
+### 4. Kiểm chứng
+
+Chạy daemon trước (`ctx daemon start`) — MCP server ghi file, daemon mới là bên
+tạo version. Sau đó từ agent đọc/ghi một file trong nguồn đang được watch rồi
+kiểm tra:
+
+```bash
+ctx history <path>          # lần ghi hiện ra thành một rev, attribute agent:<id>
+tail data/mcp.log           # mỗi tool call một dòng vào/ra, kèm thời gian chạy
+```
+
+`data/mcp.log` chỉ ghi đường dẫn và thời lượng — không bao giờ ghi nội dung
+file. Mọi call đều có bound (chờ lock 30s, 4s mỗi git call, worst case 48s), nên
+call bị kẹt sẽ fail bằng lỗi có cấu trúc thay vì treo.
+
 ## Bắt đầu nhanh (từ source, để đóng góp)
 
 ```bash
@@ -122,7 +225,7 @@ ctx source remove <path>
 | Dịch vụ | Địa chỉ |
 | --- | --- |
 | HTTP API | http://127.0.0.1:8000 |
-| MCP server | stdio, không có URL — đăng ký qua `fastmcp.json` với MCP client |
+| MCP server | stdio, không có URL — xem [Kết nối AI agent (MCP)](#kết-nối-ai-agent-mcp) |
 
 | Biến           | Ý nghĩa                                   | Mặc định           |
 | -------------- | ------------------------------------------ | ------------------ |

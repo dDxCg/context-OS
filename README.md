@@ -101,6 +101,111 @@ export PATH="$PATH:<dir from the warning>"
 
 Requires `git` on PATH (the storage backend shells out to `git`).
 
+## Connect an AI agent (MCP)
+
+The MCP server speaks **stdio** — no URL, no port. Every client below spawns
+it as a subprocess, so all you give them is a command.
+
+### 1. The launch command
+
+Whichever runner you already use — both fetch or reuse the package themselves,
+so nothing has to be installed first:
+
+```bash
+uvx --from chrono-ctx python -m app.mcp.server        # uv
+pipx run --spec chrono-ctx python -m app.mcp.server   # pipx
+```
+
+The examples below use the `uvx` form; swap in the `pipx run` one anywhere by
+replacing the `command`/`args` pair.
+
+### 2. Register it with your client
+
+**Claude Code** — one command, no file editing:
+
+```bash
+claude mcp add chrono-ctx -- uvx --from chrono-ctx python -m app.mcp.server
+claude mcp add --scope project chrono-ctx -- <command> <args...>   # commit to .mcp.json for the team
+```
+
+**Claude Desktop** — `claude_desktop_config.json` (Settings → Developer → Edit
+Config; `%APPDATA%\Claude\` on Windows, `~/Library/Application Support/Claude/`
+on macOS):
+
+```json
+{
+  "mcpServers": {
+    "chrono-ctx": {
+      "command": "uvx",
+      "args": ["--from", "chrono-ctx", "python", "-m", "app.mcp.server"]
+    }
+  }
+}
+```
+
+**Codex CLI** — `~/.codex/config.toml` (note `mcp_servers`, with an
+underscore). Prefer `codex mcp add`, since one malformed line takes down every
+server:
+
+```toml
+[mcp_servers.chrono-ctx]
+command = "uvx"
+args = ["--from", "chrono-ctx", "python", "-m", "app.mcp.server"]
+```
+
+**VS Code / GitHub Copilot** — `.vscode/mcp.json` (workspace) or the user
+profile one. VS Code's top-level key is `servers`, **not** `mcpServers`:
+
+```json
+{
+  "servers": {
+    "chrono-ctx": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["--from", "chrono-ctx", "python", "-m", "app.mcp.server"]
+    }
+  }
+}
+```
+
+**Cursor** — `.cursor/mcp.json` (project) or `~/.cursor/mcp.json` (global);
+**Windsurf** — `~/.codeium/windsurf/mcp_config.json`
+(`%USERPROFILE%\.codeium\windsurf\` on Windows); **Gemini CLI** —
+`.gemini/settings.json` (project) or `~/.gemini/settings.json`. All three take
+the same `mcpServers` block as Claude Desktop above. Restart the client after
+editing.
+
+### 3. Point the agent at the same data as the daemon
+
+The MCP server ignores its cwd on purpose (the client picks it, and it would
+silently split the two processes across different `config.yaml` files). It
+resolves everything against `CHRONO_CTX_HOME`, falling back to the per-user
+data directory.
+
+That default already matches a `pipx`/`pip`-installed daemon, so most setups
+need nothing here. **It diverges if the daemon runs from a source checkout**,
+which anchors to the repo root instead — and the symptom is quiet: writes land
+on disk but nothing is ever versioned. Pin it explicitly in that case:
+
+```json
+"env": { "CHRONO_CTX_HOME": "/path/to/chrono-ctx" }
+```
+
+### 4. Verify
+
+Start the daemon first (`ctx daemon start`) — the MCP server writes files, the
+daemon is what versions them. Then, from the agent, read and write a file
+under a watched source and check:
+
+```bash
+ctx history <path>          # the write shows up as a rev, attributed to agent:<id>
+tail data/mcp.log           # one entry/exit line per tool call, with elapsed time
+```
+
+`data/mcp.log` records paths and durations only — never file contents. Every
+call is bounded (30s lock wait, 4s per git call, 48s worst case), so a stuck
+call fails with a structured error instead of hanging.
+
 ## Quick start (from source, for contributing)
 
 ```bash
@@ -124,7 +229,7 @@ ctx source remove <path>
 | Service | Address |
 | --- | --- |
 | HTTP API | http://127.0.0.1:8000 |
-| MCP server | stdio, no URL — register via `fastmcp.json` with an MCP client |
+| MCP server | stdio, no URL — see [Connect an AI agent (MCP)](#connect-an-ai-agent-mcp) |
 
 | Variable       | Meaning                                     | Default            |
 | -------------- | -------------------------------------------- | ------------------ |
